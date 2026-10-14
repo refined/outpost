@@ -125,7 +125,7 @@ GET /v1/reports/balances
 - **`merchants`**: what the MoR owes each merchant. A **negative** balance means the merchant owes the MoR.
 - **`mor`**: the MoR's own position (fee revenue, money held at the PSP).
 - **`integrity`**: proves the ledger sums to zero in every currency.
-- **`asOf`** filters by event time.
+- **`asOf`** (optional) asks for balances at a past event time; they are summed from the postings. Without it, the report reads the stored running balances.
 
 ## Ledger design
 
@@ -265,14 +265,14 @@ cd service && ./gradlew test                     # with a local JDK
 
 What the suite covers:
 - **Money math**: unit tests plus a seeded property test over 10,000 random payments and refund sequences, checking no drift, no negative parts and an exact final refund.
-- **Ledger**: balances; database-level rejection of unbalanced entries; append-only enforcement.
+- **Ledger**: balances; stored running balances equal the sum of postings (`Ledger.verify`), and drift is detected; database-level rejection of unbalanced entries; append-only history; accounts may change only their balance.
 - **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, and validation.
-- **Concurrency**: 20 racing partial refunds, duplicate captures, replayed refunds.
+- **Concurrency**: 16 parallel captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
 
 Tests run against a real Postgres:
 - in the compose `test` service, a throwaway `postgres-test` (tmpfs);
 - with `./gradlew test`, one started by Testcontainers;
-- otherwise, any dedicated, empty database set via `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`). The tests truncate its tables.
+- otherwise, any dedicated database set via `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`). The tests **drop and recreate its schema**, so never point it at data you care about.
 
 [CI](.github/workflows/ci.yml) runs two paths:
 - **Docker:** builds the image, brings up compose, runs an API smoke test (capture → refund → balanced report) and the test suite in Docker.
@@ -299,7 +299,7 @@ The default ports (8090, 5442) are deliberately not 8080/5432, to avoid clashing
 
 ## Stack
 
-Kotlin 2.4 (JVM 17), Ktor 3, PostgreSQL 17 via plain JDBC (HikariCP), Flyway, kotlinx.serialization; JUnit 6 + Testcontainers; Gradle 9 via the wrapper.
+Kotlin 2.4 (bytecode for JVM 17+), Ktor 3, PostgreSQL 17 via plain JDBC (HikariCP), Flyway, kotlinx.serialization; JUnit 6 + Testcontainers; Gradle 9 via the wrapper. Docker: a multi-stage image (JDK 21 build, JRE 21 runtime as a non-root user, healthcheck on `/health`) and Docker Compose for the stack.
 
 There is deliberately no DI framework and no ORM: in a ledger, the SQL and the transaction boundaries are the interesting part, so they stay explicit. The demo console is vanilla JS with no build step.
 
@@ -310,7 +310,7 @@ docs/                          requirements, demo.http, domain background
 service/                       the Kotlin service (Gradle project + Dockerfile)
   src/main/kotlin/io/github/refined/morledger/
     money/Allocation.kt        capture split, refund apportionment (pure functions)
-    ledger/Ledger.kt           double-entry engine: post, balances, entries
+    ledger/Ledger.kt           double-entry engine: post (+ running balances), balances, verify, entries
     ledger/ChartOfAccounts.kt  accounts and the postings for capture/refund
     payments/                  PaymentService (transactions, idempotency, locking), repository, model
     reports/BalanceReport.kt   ledger balances -> report
