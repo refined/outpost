@@ -6,6 +6,10 @@
 build/
 .kotlin/
 out/
+# The build runs in Docker (gradle image); IntelliJ generates a local wrapper on import, which stays local.
+/gradlew
+/gradlew.bat
+/gradle/
 
 # IDE
 .idea/
