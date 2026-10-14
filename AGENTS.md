@@ -12,7 +12,8 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a balances report: tax owed to authorities, merchant balances.
 - **Spec:** [docs/requirements.md](docs/requirements.md).
 - **Target date:** 2026-10-19.
-- **Status:** skeleton. `/health` works. Capture, refund and report are `501` stubs. The ledger schema is not written yet.
+- **Status:** skeleton. `/health` works. Capture, refund and report are `501` stubs. The ledger schema is not written yet. CI runs on Linux, macOS and Windows.
+- **Platforms:** must build, test and run on macOS, Linux and Windows.
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
 ## Stack
@@ -24,7 +25,8 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | DB access | Plain JDBC + HikariCP | No ORM: SQL and transaction boundaries stay explicit |
 | Migrations | Flyway (`src/main/resources/db/migration`) | |
 | Database | PostgreSQL 17 (docker-compose) | |
-| Tests | JUnit 6, Ktor `testApplication`, Testcontainers | Docker must be running |
+| Tests | JUnit 6, Ktor `testApplication`, Testcontainers | Docker by default; or an external Postgres via `TEST_DB_URL` |
+| CI | GitHub Actions, `.github/workflows/ci.yml` | Ubuntu (JDK 17 + 25), macOS, Windows |
 | Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `gradle/libs.versions.toml` | Gradle is not installed globally; always use `./gradlew` |
 
 There is no DI framework: the app is wired by hand in `Application.module(dataSource)`. Keep dependencies minimal, and justify any new one.
@@ -39,7 +41,8 @@ src/main/kotlin/io/github/refined/morledger/
 src/main/resources/
   db/migration/         Flyway migrations V{n}__*.sql
   logback.xml
-src/test/kotlin/...     integration tests (Testcontainers Postgres)
+src/test/kotlin/...     tests; TestDatabase = one shared, migrated Postgres per test JVM
+.github/workflows/      CI
 docs/requirements.md    what we build and why
 docs/domain/            MoR background: VAT, money flows, ledger posting examples
 ```
@@ -54,6 +57,26 @@ docker compose up -d --wait   # Postgres on 127.0.0.1:5442 (db/user/password: mo
 ```
 
 Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`.
+
+Tests use `TestDatabase`:
+- if `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`) is set, they use that database;
+- otherwise they start Postgres via Testcontainers.
+
+Tests create tables, so point `TEST_DB_URL` at a dedicated database, not the dev one.
+
+## CI
+
+`.github/workflows/ci.yml` runs `./gradlew build` on push to `main`, on PRs and on manual dispatch. The matrix:
+- Ubuntu with JDK 17 and JDK 25 (Testcontainers);
+- macOS with JDK 17 (native Postgres via `ikalnytskyi/action-setup-postgres`);
+- Windows with JDK 17 (native Postgres, run through `gradlew.bat`).
+
+GitHub's macOS/Windows runners cannot run Linux containers, so they use native Postgres. On failure, the test reports are uploaded as artifacts.
+
+Rules:
+- Code must stay cross-platform: no shell-specific build steps; use `java.nio.file` paths, not string concatenation.
+- `gradlew` must keep its executable bit (`git update-index --chmod=+x gradlew`); git on Windows drops it easily.
+- A new test that needs the database uses `TestDatabase.dataSource`; never start a separate container per test class.
 
 ## Environment notes
 

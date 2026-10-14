@@ -1,5 +1,7 @@
 # Mini MoR Ledger Service
 
+[![CI](https://github.com/refined/outpost/actions/workflows/ci.yml/badge.svg)](https://github.com/refined/outpost/actions/workflows/ci.yml)
+
 A small Merchant of Record (MoR) ledger service. It records captured payments and refunds and reports:
 - how much the MoR owes tax authorities;
 - each merchant's balance with the MoR.
@@ -21,7 +23,7 @@ There is deliberately no DI framework and no ORM. The interesting part of a ledg
 
 ## Running locally
 
-Prerequisites: JDK 17+ and Docker.
+Prerequisites: JDK 17+ and Docker. Works on macOS, Linux and Windows.
 
 ```bash
 docker compose up -d --wait       # Postgres on localhost:5442
@@ -29,7 +31,7 @@ docker compose up -d --wait       # Postgres on localhost:5442
 curl localhost:8090/health        # {"status":"ok"}
 ```
 
-On Windows, use `gradlew.bat` instead of `./gradlew`.
+On Windows, use `gradlew.bat` (cmd) or `.\gradlew.bat` (PowerShell) instead of `./gradlew`. Git Bash works with `./gradlew` as is.
 
 Configuration is read from environment variables:
 
@@ -48,7 +50,27 @@ The non-default ports (5442, 8090) are there to avoid clashing with a local Post
 ./gradlew test
 ```
 
-Integration tests start their own Postgres through Testcontainers, so Docker must be running.
+Integration tests run against a real Postgres:
+
+- **Default:** Testcontainers starts a throwaway `postgres:17-alpine`, so Docker must be running.
+- **Without Docker:** point the tests at any Postgres you have:
+  ```bash
+  TEST_DB_URL=jdbc:postgresql://localhost:5432/mor_ledger_test TEST_DB_USER=... TEST_DB_PASSWORD=... ./gradlew test
+  ```
+  The tests create tables in that database, so use a dedicated database.
+
+### CI
+
+[GitHub Actions](.github/workflows/ci.yml) runs `build` (compile + all tests) on every push and pull request. Four jobs:
+
+| Runner | JDK | Postgres |
+|---|---|---|
+| Ubuntu | 17 | Testcontainers |
+| Ubuntu | 25 | Testcontainers |
+| macOS | 17 | native |
+| Windows | 17 | native, via `gradlew.bat` |
+
+GitHub's macOS and Windows runners can't run Linux containers, so those jobs install Postgres natively and use `TEST_DB_URL`.
 
 ## API
 
