@@ -83,7 +83,7 @@ Rules:
 - The development machine runs Windows. Git Bash and PowerShell are both available; in PowerShell, use `.\gradlew.bat`.
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.
-- Never push to the remote without explicit approval from the repo owner. The repo is public.
+- The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run `./gradlew build` before pushing.
 
 ## Coding conventions
 
