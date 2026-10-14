@@ -26,7 +26,8 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | Migrations | Flyway (`src/main/resources/db/migration`) | |
 | Database | PostgreSQL 17 (docker-compose) | |
 | Tests | JUnit 6, Ktor `testApplication`, Testcontainers | Docker by default; or an external Postgres via `TEST_DB_URL` |
-| CI | GitHub Actions, `.github/workflows/ci.yml` | Ubuntu (JDK 17 + 25), macOS, Windows |
+| CI | GitHub Actions, `.github/workflows/ci.yml` | Gradle on Ubuntu (JDK 17 + 25), macOS, Windows; plus a docker compose job |
+| Runtime | Docker: `Dockerfile` (multi-stage) + `docker-compose.yml` | Host needs only Docker |
 | Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `gradle/libs.versions.toml` | Gradle is not installed globally; always use `./gradlew` |
 
 There is no DI framework: the app is wired by hand in `Application.module(dataSource, pricing, clock)`. Keep dependencies minimal, and justify any new one.
@@ -56,11 +57,21 @@ docs/domain/            MoR background: VAT, money flows, ledger posting example
 
 ## Commands
 
+**Everything runs in Docker** (user requirement: the host needs only Docker). Multi-stage `Dockerfile`: `build` stage = JDK 21 + Gradle wrapper; runtime = JRE 21, non-root user, healthcheck on `/health`.
+
 ```bash
-docker compose up -d --wait   # Postgres on 127.0.0.1:5442 (db/user/password: mor_ledger/mor/mor)
-./gradlew build               # compile + tests
-./gradlew test                # tests only; report: build/reports/tests/test/index.html
-./gradlew run                 # service on http://localhost:8090
+docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + app (127.0.0.1:8090)
+docker compose --profile test run --rm test      # test suite in the build stage, against postgres-test (tmpfs)
+docker compose logs -f app
+docker compose down                              # -v also drops the pgdata volume
+```
+
+Host-JDK workflow (optional, for fast edit-run loops):
+
+```bash
+docker compose up -d --wait postgres
+./gradlew build               # compile + tests (Testcontainers)
+./gradlew run                 # service on http://localhost:8090 (stop the app container first: same port)
 ```
 
 Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`).
@@ -93,7 +104,8 @@ Rules:
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.
 - The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run `./gradlew build` before pushing.
-- `./gradlew run` started from a background shell leaves its JVM running when the shell is killed (Windows). Before restarting, free port 8090: find the `java.exe` owning it and stop it, or you will be testing the old build.
+- Prefer the Docker workflow. If you use `./gradlew run` from a background shell, killing the shell leaves the JVM running (Windows); free port 8090 (stop the `java.exe` owning it) before restarting, or you will be testing the old build.
+- After changing code, `docker compose up -d --build --wait` rebuilds the image; without `--build` the old image keeps running.
 
 ## Coding conventions
 
@@ -149,6 +161,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 14 | JSON | Strict: unknown fields → 400; amounts are integers; rates are decimal strings |
 | 15 | Ledger engine | Own, on Postgres; DB enforces balance (deferred constraint trigger) and append-only (triggers); TRUNCATE allowed for tests |
 | 16 | Demo | `/ui` vanilla JS console + `/docs` Swagger (swagger-ui-dist from jsDelivr, pinned 5.33.0); no extra Gradle dependency |
+| 17 | Runtime | Everything in Docker: app image + Postgres via compose; tests via the compose `test` profile; CI has a `docker` job (build, smoke test, tests in Docker) |
 
 ## Ideas not done (candidates if time allows)
 

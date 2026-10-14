@@ -71,3 +71,31 @@ jobs:
         with:
           name: test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
           path: build/reports/tests/
+
+  # The Docker-only path from the README: no JDK on the host, everything via docker compose.
+  docker:
+    name: docker compose · image, smoke test, test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the image and start Postgres + app
+        run: docker compose up -d --build --wait
+
+      - name: Smoke test through the API
+        run: |
+          curl -fsS localhost:8090/health
+          curl -fsS -X POST localhost:8090/v1/payments -H 'Content-Type: application/json' \
+            -d '{"paymentId":"pay_ci","merchantId":"acme","amount":12100,"currency":"EUR","taxRate":"0.21","taxJurisdiction":"NL"}'
+          curl -fsS -X POST localhost:8090/v1/payments/pay_ci/refunds -H 'Content-Type: application/json' -d '{"refundId":"ref_ci"}'
+          curl -fsS localhost:8090/v1/reports/balances | tee report.json
+          grep -q '"balanced":true' report.json
+          curl -fsS -o /dev/null localhost:8090/ui/
+
+      - name: Test suite in Docker
+        run: docker compose --profile test run --rm test
+
+      - name: Container logs
+        if: failure()
+        run: docker compose logs

@@ -1,3 +1,9 @@
+# Everything runs in Docker; the host needs nothing but Docker.
+#
+#   docker compose up -d --build --wait            # Postgres + service -> http://localhost:8090/ui/
+#   docker compose --profile test run --rm test    # full test suite in a JDK container, against its own Postgres
+#   docker compose down                            # stop (add -v to drop the data volume)
+
 services:
   postgres:
     image: postgres:17-alpine
@@ -6,7 +12,7 @@ services:
       POSTGRES_USER: mor
       POSTGRES_PASSWORD: mor
     ports:
-      - "127.0.0.1:5442:5432"
+      - "127.0.0.1:5442:5432" # exposed for psql/IDE access only; the app talks to it over the compose network
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,5 +21,52 @@ services:
       timeout: 3s
       retries: 15
 
+  app:
+    build: .
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/mor_ledger
+      DB_USER: mor
+      DB_PASSWORD: mor
+      MOR_FEE_RATE: ${MOR_FEE_RATE:-0.05}
+      REFUND_FEE_POLICY: ${REFUND_FEE_POLICY:-MOR_KEEPS_FEE}
+    ports:
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Tests (profile "test"): the build stage of the Dockerfile runs Gradle against a throwaway database. ──────
+  postgres-test:
+    profiles: [test]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mor_ledger_test
+      POSTGRES_USER: mor
+      POSTGRES_PASSWORD: mor
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mor -d mor_ledger_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  test:
+    profiles: [test]
+    build:
+      context: .
+      target: build
+    command: ["./gradlew", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
+    environment:
+      TEST_DB_URL: jdbc:postgresql://postgres-test:5432/mor_ledger_test
+      TEST_DB_USER: mor
+      TEST_DB_PASSWORD: mor
+    volumes:
+      - gradle-cache:/root/.gradle
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  gradle-cache:

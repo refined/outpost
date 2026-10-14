@@ -50,4 +50,9 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // One line per test: in Docker there is no HTML report to open, so the console is the report.
+    testLogging {
+        events("passed", "skipped", "failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
 }

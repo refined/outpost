@@ -16,14 +16,15 @@ The service records **captures** and **refunds** as balanced double-entry journa
 
 ## Quick start
 
-Prerequisites: **JDK 17+** and **Docker**. Works on macOS, Linux and Windows.
+Prerequisites: **Docker only**: no JDK or Gradle on the host. Works on macOS, Linux and Windows.
 
 ```bash
-docker compose up -d --wait       # Postgres 17 on localhost:5442
-./gradlew run                     # service on http://localhost:8090
+docker compose up -d --build --wait              # builds the image, starts Postgres + the service
+docker compose --profile test run --rm test      # runs the full test suite in a container, against its own Postgres
+docker compose down                              # stop (add -v to also drop the database volume)
 ```
 
-On Windows, use `gradlew.bat` (cmd) or `.\gradlew.bat` (PowerShell); Git Bash takes `./gradlew` as is.
+The first build downloads Gradle and the dependencies (a few minutes); later builds reuse the cache.
 
 | URL | What |
 |---|---|
@@ -31,8 +32,12 @@ On Windows, use `gradlew.bat` (cmd) or `.\gradlew.bat` (PowerShell); Git Bash ta
 | http://localhost:8090/docs/ | Swagger UI over the [OpenAPI spec](src/main/resources/web/openapi.yaml) |
 | [docs/demo.http](docs/demo.http) | The same scenario as plain HTTP requests (IntelliJ HTTP client / VS Code REST Client) |
 
+**Working on the code without Docker for the app** (optional, needs JDK 17+): keep Postgres in Docker and run the service from the host. Gradle itself comes via the wrapper.
+
 ```bash
-./gradlew test                    # 40 tests; needs Docker (Testcontainers), or see "Tests" below
+docker compose up -d --wait postgres
+./gradlew run                     # same URLs; Windows: gradlew.bat (cmd) or .\gradlew.bat (PowerShell)
+./gradlew test                    # Testcontainers starts its own Postgres
 ```
 
 ## Where the difficulty is
@@ -202,7 +207,15 @@ Where the brief is open, these are the decisions and why.
 
 **Fee policy as config, not per merchant.** One global setting, snapshotted per payment. Per-merchant pricing would move these settings to a merchant contract table, and the snapshot logic would stay the same.
 
-**Concurrency via a row lock.** Refunds of one payment are serialised with `SELECT … FOR UPDATE` on the payment. Contention is per payment, which is acceptable. Captures race only on the primary key (`INSERT … ON CONFLICT DO NOTHING`, then compare fingerprints).
+**Concurrency: one row lock, and only for refunds.**
+- **Posting takes no locks.** Writing a journal entry is plain `INSERT`s. Balances are not stored anywhere, so there is no balance row to update or contend on.
+- **Refunds need a lock.** A refund is a read-check-write: read what is still refundable, check the amount, insert. Two concurrent partial refunds could both pass the check and over-refund. The refund therefore takes `SELECT … FOR UPDATE` on its payment row, which serialises refunds *of the same payment* only.
+- **Captures race only on the primary key** (`INSERT … ON CONFLICT DO NOTHING`, then compare fingerprints).
+
+Alternatives considered for refunds:
+- **`SERIALIZABLE` isolation** with retry on serialization failure: correct, but needs retry plumbing.
+- **A `refunded_amount` column with `CHECK (refunded_amount <= amount)`:** would let the DB enforce the limit, but it means updating the payment row, which the append-only rule forbids.
+- **TigerBeetle's `debits_must_not_exceed_credits`:** the same idea, built into the engine.
 
 **Strictness over convenience.**
 - Unknown JSON fields are rejected.
@@ -223,7 +236,8 @@ Where the brief is open, these are the decisions and why.
 ## Tests and CI
 
 ```bash
-./gradlew test
+docker compose --profile test run --rm test      # Docker only
+./gradlew test                                   # with a local JDK
 ```
 
 What the suite covers:
@@ -233,17 +247,22 @@ What the suite covers:
 - **Concurrency**: 20 racing partial refunds, duplicate captures, replayed refunds.
 
 Tests run against a real Postgres:
-- by default it comes from Testcontainers (Docker);
-- without Docker, set `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`) to a dedicated, empty database. The tests truncate its tables.
+- in the compose `test` service, a throwaway `postgres-test` (tmpfs);
+- with `./gradlew test`, one started by Testcontainers;
+- otherwise, any dedicated, empty database set via `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`). The tests truncate its tables.
 
-[CI](.github/workflows/ci.yml) builds and tests on Ubuntu (JDK 17 and 25, Testcontainers), macOS and Windows (JDK 17, native Postgres, `gradlew.bat` on Windows).
+[CI](.github/workflows/ci.yml) runs two paths:
+- **Docker:** builds the image, brings up compose, runs an API smoke test (capture → refund → balanced report) and the test suite in Docker.
+- **Gradle:** on Ubuntu (JDK 17 and 25, Testcontainers), macOS and Windows (JDK 17, native Postgres, `gradlew.bat` on Windows).
 
 ## Configuration
+
+Set in [docker-compose.yml](docker-compose.yml) for the container. `MOR_FEE_RATE` and `REFUND_FEE_POLICY` can be overridden from the shell, e.g. `REFUND_FEE_POLICY=MOR_RETURNS_FEE docker compose up -d --wait`.
 
 | Variable | Default | |
 |---|---|---|
 | `PORT` | `8090` | HTTP port |
-| `DB_URL` | `jdbc:postgresql://localhost:5442/mor_ledger` | |
+| `DB_URL` | `jdbc:postgresql://localhost:5442/mor_ledger` (compose: `…//postgres:5432/…`) | |
 | `DB_USER` / `DB_PASSWORD` | `mor` / `mor` | |
 | `MOR_FEE_RATE` | `0.05` | MoR fee as a fraction of gross, `[0, 0.5]` |
 | `REFUND_FEE_POLICY` | `MOR_KEEPS_FEE` | or `MOR_RETURNS_FEE` |
