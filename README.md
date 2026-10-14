@@ -6,12 +6,16 @@ A small Merchant of Record (MoR) ledger service. It records captured payments an
 
 > **Status: work in progress.** This commit is the project skeleton. The service starts, connects to Postgres and runs migrations; the ledger endpoints are stubs that return `501 Not Implemented`.
 
+- What we build and why: [docs/requirements.md](docs/requirements.md).
+- Working notes, decisions and open questions: [AGENTS.md](AGENTS.md).
+
 ## Stack
 
 - Kotlin 2.4 on JVM 17
 - Ktor 3: Netty, kotlinx.serialization
 - PostgreSQL 17, accessed through plain JDBC (HikariCP); schema migrations with Flyway
 - Tests: JUnit 6, Ktor test host, Testcontainers
+- Build: Gradle 9 (Kotlin DSL) via the wrapper; only a JDK is needed, no Gradle install
 
 There is deliberately no DI framework and no ORM. The interesting part of a ledger is its SQL and its transaction boundaries, so those stay explicit.
 
