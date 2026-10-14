@@ -1,5 +1,5 @@
 ### Demo scenario for the IntelliJ HTTP client (or VS Code REST Client).
-### Start the service first:  docker compose up -d --wait  &&  ./gradlew run
+### Start the stack first:  docker compose up -d --build --wait
 ### Ids carry a timestamp so the file can be run repeatedly against the same database.
 
 @base = http://localhost:8090

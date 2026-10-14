@@ -58,11 +58,13 @@ jobs:
 
       - name: Build and test (gradlew)
         if: runner.os != 'Windows'
+        working-directory: service
         run: ./gradlew build
 
       - name: Build and test (gradlew.bat)
         if: runner.os == 'Windows'
         shell: cmd
+        working-directory: service
         run: gradlew.bat build
 
       - name: Upload test reports
@@ -70,7 +72,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
-          path: build/reports/tests/
+          path: service/build/reports/tests/
 
   # The Docker-only path from the README: no JDK on the host, everything via docker compose.
   docker:

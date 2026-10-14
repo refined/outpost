@@ -23,36 +23,41 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | Language | Kotlin 2.4, JVM target 17 | Builds with any JDK 17+ |
 | HTTP | Ktor 3 (Netty), kotlinx.serialization | |
 | DB access | Plain JDBC + HikariCP | No ORM: SQL and transaction boundaries stay explicit |
-| Migrations | Flyway (`src/main/resources/db/migration`) | |
+| Migrations | Flyway (`service/src/main/resources/db/migration`) | |
 | Database | PostgreSQL 17 (docker-compose) | |
 | Tests | JUnit 6, Ktor `testApplication`, Testcontainers | Docker by default; or an external Postgres via `TEST_DB_URL` |
 | CI | GitHub Actions, `.github/workflows/ci.yml` | Gradle on Ubuntu (JDK 17 + 25), macOS, Windows; plus a docker compose job |
-| Runtime | Docker: `Dockerfile` (multi-stage) + `docker-compose.yml` | Host needs only Docker |
-| Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `gradle/libs.versions.toml` | Gradle is not installed globally; always use `./gradlew` |
+| Runtime | Docker: `service/Dockerfile` (multi-stage) + root `docker-compose.yml` + optional `.env` (`.env.example`) | Host needs only Docker |
+| Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `service/gradle/libs.versions.toml` | The Gradle project is `service/`; Gradle is not installed globally, so use `./gradlew` from `service/` |
 
 There is no DI framework: the app is wired by hand in `Application.module(dataSource, pricing, clock)`. Keep dependencies minimal, and justify any new one.
 
 ## Layout
 
+The root holds only what is needed to run and read the project; the Gradle project lives in `service/`. Keep the root that way.
+
 ```
-src/main/kotlin/io/github/refined/morledger/
-  Application.kt              main(), AppConfig (env), Application.module()
-  money/Allocation.kt         pure money math: capture split, refund apportionment, RefundFeePolicy
-  ledger/Ledger.kt            generic double-entry engine (knows nothing about payments)
-  ledger/ChartOfAccounts.kt   account codes + postings for capture/refund
-  payments/                   PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
-  reports/BalanceReport.kt    ledger balances -> report
-  api/                        Routes, Dto (wire format), Errors (DomainException -> HTTP status)
-  db/Database.kt              Hikari + Flyway, DataSource.transaction { }
-src/main/resources/
-  db/migration/               V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
-  web/                        ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
-  logback.xml
-docs/demo.http              demo scenario as HTTP requests
-src/test/kotlin/...     tests; TestDatabase = one shared, migrated Postgres per test JVM
-.github/workflows/      CI
-docs/requirements.md    what we build and why
-docs/domain/            MoR background: VAT, money flows, ledger posting examples
+docker-compose.yml               the whole stack (postgres, app, test profile); settings from optional .env
+.env.example                     every compose setting with its default (.env is gitignored)
+README.md, AGENTS.md, CLAUDE.md  docs for reviewers / agents (CLAUDE.md just imports this file)
+docs/requirements.md             what we build and why
+docs/demo.http                   demo scenario as HTTP requests
+docs/domain/                     MoR background: VAT, money flows, ledger posting examples
+.github/workflows/ci.yml         CI
+service/                         Gradle project: build.gradle.kts, settings, wrapper, Dockerfile, .dockerignore, .editorconfig
+  src/main/kotlin/io/github/refined/morledger/
+    Application.kt               main(), AppConfig (env), Application.module()
+    money/Allocation.kt          pure money math: capture split, refund apportionment, RefundFeePolicy
+    ledger/Ledger.kt             generic double-entry engine (knows nothing about payments); running balances, verify
+    ledger/ChartOfAccounts.kt    account codes + postings for capture/refund
+    payments/                    PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
+    reports/BalanceReport.kt     ledger balances -> report
+    api/                         Routes, Dto (wire format), Errors (DomainException -> HTTP status)
+    db/Database.kt               Hikari + Flyway, DataSource.transaction { }
+  src/main/resources/
+    db/migration/                V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
+    web/                         ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
+  src/test/kotlin/...            tests; TestDatabase = one shared, migrated Postgres per test JVM
 ```
 
 ## Commands
@@ -70,6 +75,7 @@ Host-JDK workflow (optional, for fast edit-run loops):
 
 ```bash
 docker compose up -d --wait postgres
+cd service
 ./gradlew build               # compile + tests (Testcontainers)
 ./gradlew run                 # service on http://localhost:8090 (stop the app container first: same port)
 ```
@@ -86,7 +92,7 @@ Tests create and **truncate** tables (`TestDatabase.reset()`), so point `TEST_DB
 
 ## CI
 
-`.github/workflows/ci.yml` runs `./gradlew build` on push to `main`, on PRs and on manual dispatch. The matrix:
+`.github/workflows/ci.yml` runs `./gradlew build` (in `service/`) on push to `main`, on PRs and on manual dispatch. The matrix:
 - Ubuntu with JDK 17 and JDK 25 (Testcontainers);
 - macOS with JDK 17 (native Postgres via `ikalnytskyi/action-setup-postgres`);
 - Windows with JDK 17 (native Postgres, run through `gradlew.bat`).
@@ -95,7 +101,7 @@ GitHub's macOS/Windows runners cannot run Linux containers, so they use native P
 
 Rules:
 - Code must stay cross-platform: no shell-specific build steps; use `java.nio.file` paths, not string concatenation.
-- `gradlew` must keep its executable bit (`git update-index --chmod=+x gradlew`); git on Windows drops it easily.
+- `service/gradlew` must keep its executable bit (`git update-index --chmod=+x service/gradlew`); git on Windows drops it easily.
 - A new test that needs the database uses `TestDatabase.dataSource`; never start a separate container per test class.
 
 ## Environment notes
@@ -103,7 +109,7 @@ Rules:
 - The development machine runs Windows. Git Bash and PowerShell are both available; in PowerShell, use `.\gradlew.bat`.
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.
-- The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run `./gradlew build` before pushing.
+- The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run the tests (`docker compose --profile test run --rm test`, or `./gradlew build` in `service/`) before pushing.
 - Prefer the Docker workflow. If you use `./gradlew run` from a background shell, killing the shell leaves the JVM running (Windows); free port 8090 (stop the `java.exe` owning it) before restarting, or you will be testing the old build.
 - After changing code, `docker compose up -d --build --wait` rebuilds the image; without `--build` the old image keeps running.
 

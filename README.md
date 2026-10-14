@@ -24,18 +24,19 @@ docker compose --profile test run --rm test      # runs the full test suite in a
 docker compose --profile test down               # stop everything, incl. the test database (-v also drops data)
 ```
 
-The first build downloads Gradle and the dependencies (a few minutes); later builds reuse the cache.
+The first build downloads Gradle and the dependencies (a few minutes); later builds reuse the cache. Ports and settings can be changed in an optional `.env` (see [Configuration](#configuration)).
 
 | URL | What |
 |---|---|
 | http://localhost:8090/ui/ | **Demo console**: capture, refund, run a scripted scenario, and watch the report, payments and journal update |
-| http://localhost:8090/docs/ | Swagger UI over the [OpenAPI spec](src/main/resources/web/openapi.yaml) |
+| http://localhost:8090/docs/ | Swagger UI over the [OpenAPI spec](service/src/main/resources/web/openapi.yaml) |
 | [docs/demo.http](docs/demo.http) | The same scenario as plain HTTP requests (IntelliJ HTTP client / VS Code REST Client) |
 
-**Working on the code without Docker for the app** (optional, needs JDK 17+): keep Postgres in Docker and run the service from the host. Gradle itself comes via the wrapper.
+**Working on the code without Docker for the app** (optional, needs JDK 17+): keep Postgres in Docker and run the service from the host. The Gradle project lives in [`service/`](service/), and Gradle itself comes via the wrapper.
 
 ```bash
 docker compose up -d --wait postgres
+cd service
 ./gradlew run                     # same URLs; Windows: gradlew.bat (cmd) or .\gradlew.bat (PowerShell)
 ./gradlew test                    # Testcontainers starts its own Postgres
 ```
@@ -155,7 +156,7 @@ With `REFUND_FEE_POLICY=MOR_RETURNS_FEE`, the refunds also debit `fee_revenue` a
 
 This is the model the established ledgers use: TigerBeetle keeps debit/credit counters on each account; Modern Treasury keeps balances on the account with a lock version.
 
-**Invariants enforced by the database**, not only by the code (see [V1__schema.sql](src/main/resources/db/migration/V1__schema.sql)):
+**Invariants enforced by the database**, not only by the code (see [V1__schema.sql](service/src/main/resources/db/migration/V1__schema.sql)):
 - **Balanced, single-currency entries.** A deferred constraint trigger checks that every journal entry balances and uses a single currency, at commit time.
 - **Append-only history.** Triggers reject `UPDATE`/`DELETE` on postings, entries, payments and refunds; corrections are new entries.
 - **Fixed account identity.** On accounts, only `balance` may change.
@@ -163,7 +164,7 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
 
-**Code layout.** The ledger engine ([`ledger/Ledger.kt`](src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+**Code layout.** The ledger engine ([`ledger/Ledger.kt`](service/src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](service/src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](service/src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
 
 ## Assumptions
 
@@ -259,7 +260,7 @@ Alternatives considered:
 
 ```bash
 docker compose --profile test run --rm test      # Docker only
-./gradlew test                                   # with a local JDK
+cd service && ./gradlew test                     # with a local JDK
 ```
 
 What the suite covers:
@@ -279,17 +280,22 @@ Tests run against a real Postgres:
 
 ## Configuration
 
-Set in [docker-compose.yml](docker-compose.yml) for the container. `MOR_FEE_RATE` and `REFUND_FEE_POLICY` can be overridden from the shell, e.g. `REFUND_FEE_POLICY=MOR_RETURNS_FEE docker compose up -d --wait`.
+docker compose reads an optional **`.env`** next to `docker-compose.yml`. [`.env.example`](.env.example) lists every setting with its default, so the stack runs without one. To change something:
 
-| Variable | Default | |
+```bash
+cp .env.example .env     # then edit; .env is gitignored
+docker compose up -d --build --wait
+```
+
+| `.env` variable | Default | |
 |---|---|---|
-| `PORT` | `8090` | HTTP port |
-| `DB_URL` | `jdbc:postgresql://localhost:5442/mor_ledger` (compose: `…//postgres:5432/…`) | |
-| `DB_USER` / `DB_PASSWORD` | `mor` / `mor` | |
+| `APP_HOST_PORT` | `8090` | Host port of the service (bound to 127.0.0.1) |
+| `POSTGRES_HOST_PORT` | `5442` | Host port of Postgres, for psql/IDE access |
+| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` | `mor_ledger` / `mor` / `mor` | Passed to the app as `DB_URL` / `DB_USER` / `DB_PASSWORD` |
 | `MOR_FEE_RATE` | `0.05` | MoR fee as a fraction of gross, `[0, 0.5]` |
 | `REFUND_FEE_POLICY` | `MOR_KEEPS_FEE` | or `MOR_RETURNS_FEE` |
 
-The non-default ports (5442, 8090) avoid clashes with a local Postgres or another service on 5432/8080.
+The default ports (8090, 5442) are deliberately not 8080/5432, to avoid clashing with a local Postgres or another service. When running the service from the host (`./gradlew run`), it reads `PORT`, `DB_URL`, `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` and `REFUND_FEE_POLICY` from the environment, with the same defaults.
 
 ## Stack
 
@@ -298,14 +304,19 @@ Kotlin 2.4 (JVM 17), Ktor 3, PostgreSQL 17 via plain JDBC (HikariCP), Flyway, ko
 There is deliberately no DI framework and no ORM: in a ledger, the SQL and the transaction boundaries are the interesting part, so they stay explicit. The demo console is vanilla JS with no build step.
 
 ```
-src/main/kotlin/io/github/refined/morledger/
-  money/Allocation.kt          capture split, refund apportionment (pure functions)
-  ledger/Ledger.kt             double-entry engine: post, balances, entries
-  ledger/ChartOfAccounts.kt    accounts and the postings for capture/refund
-  payments/                    PaymentService (transactions, idempotency, locking), repository, model
-  reports/BalanceReport.kt     ledger balances -> report
-  api/                         routes, DTOs, error mapping
-src/main/resources/
-  db/migration/                Flyway: V1__schema.sql (ledger + business tables, constraints, triggers)
-  web/                         demo console, Swagger page, openapi.yaml
+docker-compose.yml             the whole stack: postgres, app, test profile
+.env.example                   optional settings (ports, DB credentials, pricing)
+docs/                          requirements, demo.http, domain background
+service/                       the Kotlin service (Gradle project + Dockerfile)
+  src/main/kotlin/io/github/refined/morledger/
+    money/Allocation.kt        capture split, refund apportionment (pure functions)
+    ledger/Ledger.kt           double-entry engine: post, balances, entries
+    ledger/ChartOfAccounts.kt  accounts and the postings for capture/refund
+    payments/                  PaymentService (transactions, idempotency, locking), repository, model
+    reports/BalanceReport.kt   ledger balances -> report
+    api/                       routes, DTOs, error mapping
+  src/main/resources/
+    db/migration/              Flyway: V1__schema.sql (ledger + business tables, constraints, triggers)
+    web/                       demo console, Swagger page, openapi.yaml
+  src/test/kotlin/...          unit, integration and concurrency tests
 ```
