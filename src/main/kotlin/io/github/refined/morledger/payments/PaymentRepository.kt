@@ -87,6 +87,13 @@ object PaymentRepository {
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.toRefund()) } }
         }
 
+    /** Most recently recorded payments first. */
+    fun recentDetails(conn: Connection, limit: Int): List<PaymentDetails> =
+        conn.prepareStatement("SELECT $PAYMENT_COLUMNS FROM payments ORDER BY recorded_at DESC, payment_id LIMIT ?").use { st ->
+            st.setInt(1, limit)
+            st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.toPayment()) } }
+        }.map { PaymentDetails(it, refundsOf(conn, it.paymentId)) }
+
     fun details(conn: Connection, paymentId: String): PaymentDetails? =
         findPayment(conn, paymentId)?.let { PaymentDetails(it.value, refundsOf(conn, paymentId)) }
 

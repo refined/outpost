@@ -136,6 +136,8 @@ class PaymentService(
         }
     }
 
+    fun recent(limit: Int): List<PaymentDetails> = dataSource.transaction { PaymentRepository.recentDetails(it, limit) }
+
     fun get(paymentId: String): PaymentDetails =
         dataSource.transaction { PaymentRepository.details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")

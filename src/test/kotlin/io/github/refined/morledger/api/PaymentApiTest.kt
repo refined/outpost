@@ -247,6 +247,16 @@ class PaymentApiTest {
     }
 
     @Test
+    fun `payments are listed most recent first`() = api {
+        client.capture("p_1")
+        client.capture("p_2")
+
+        val ids = client.get("/v1/payments").json().getValue("payments").jsonArray.map { it.jsonObject.str("paymentId") }
+        assertEquals(listOf("p_2", "p_1"), ids)
+        assertEquals(HttpStatusCode.BadRequest, client.get("/v1/payments?limit=0").status)
+    }
+
+    @Test
     fun `invalid requests are rejected with 400`() = api {
         val cases = listOf(
             """{"paymentId":"p","merchantId":"m","amount":0,"currency":"EUR","taxRate":"0.21","taxJurisdiction":"NL"}""",

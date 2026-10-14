@@ -1,0 +1,96 @@
+### Demo scenario for the IntelliJ HTTP client (or VS Code REST Client).
+### Start the service first:  docker compose up -d --wait  &&  ./gradlew run
+### Ids carry a timestamp so the file can be run repeatedly against the same database.
+
+@base = http://localhost:8090
+@run = {{$timestamp}}
+
+### 1. Capture €121.00 incl. 21% NL VAT -> tax 21.00, fee 6.05 (5% of gross), merchant 93.95
+POST {{base}}/v1/payments
+Content-Type: application/json
+
+{
+  "paymentId": "pay_{{run}}_1",
+  "merchantId": "acme",
+  "amount": 12100,
+  "currency": "EUR",
+  "taxRate": "0.21",
+  "taxJurisdiction": "NL"
+}
+
+### 2. Same event again (PSP webhook retry) -> 200, nothing posted twice
+POST {{base}}/v1/payments
+Content-Type: application/json
+
+{
+  "paymentId": "pay_{{run}}_1",
+  "merchantId": "acme",
+  "amount": 12100,
+  "currency": "EUR",
+  "taxRate": "0.21",
+  "taxJurisdiction": "NL"
+}
+
+### 3. Same id, different payload -> 409 idempotency_conflict
+POST {{base}}/v1/payments
+Content-Type: application/json
+
+{
+  "paymentId": "pay_{{run}}_1",
+  "merchantId": "acme",
+  "amount": 99900,
+  "currency": "EUR",
+  "taxRate": "0.21",
+  "taxJurisdiction": "NL"
+}
+
+### 4. Partial refund of €60.50 -> tax 10.50 back, merchant 50.00 back (fee kept by default)
+POST {{base}}/v1/payments/pay_{{run}}_1/refunds
+Content-Type: application/json
+
+{
+  "refundId": "ref_{{run}}_1a",
+  "amount": 6050
+}
+
+### 5. Too much -> 422 refund_exceeds_refundable
+POST {{base}}/v1/payments/pay_{{run}}_1/refunds
+Content-Type: application/json
+
+{
+  "refundId": "ref_{{run}}_1b",
+  "amount": 6051
+}
+
+### 6. Refund the rest (no amount)
+POST {{base}}/v1/payments/pay_{{run}}_1/refunds
+Content-Type: application/json
+
+{
+  "refundId": "ref_{{run}}_1c"
+}
+
+### 7. A USD sale in California, another merchant
+POST {{base}}/v1/payments
+Content-Type: application/json
+
+{
+  "paymentId": "pay_{{run}}_2",
+  "merchantId": "globex",
+  "amount": 5000,
+  "currency": "USD",
+  "taxRate": "0.0725",
+  "taxJurisdiction": "US-CA"
+}
+
+### 8. The payment with its refunds
+GET {{base}}/v1/payments/pay_{{run}}_1
+
+### 9. Balances: tax owed per jurisdiction, merchant balances, MoR position, integrity
+GET {{base}}/v1/reports/balances
+
+### 10. Balances as of a date (event time)
+GET {{base}}/v1/reports/balances?asOf=2026-10-01T00:00:00Z
+
+### 11. Journal for one payment: balanced debit/credit lines
+GET {{base}}/v1/journal?paymentId=pay_{{run}}_1

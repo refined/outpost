@@ -1,0 +1,270 @@
+openapi: 3.0.3
+info:
+  title: Mini MoR Ledger Service
+  version: 0.1.0
+  description: |
+    Records captured payments and refunds for a Merchant of Record and reports what the MoR owes tax authorities and merchants.
+
+    * Money is an integer number of **minor units** (cents) plus an ISO 4217 currency.
+    * Rates are decimal strings: `"0.21"` means 21%.
+    * `paymentId` / `refundId` are the external event ids and the idempotency keys: re-sending the same request returns
+      the stored result with `200`; re-using an id with a different payload returns `409 idempotency_conflict`.
+    * Every error has the shape `{"error": "<stable code>", "message": "<text>"}`.
+servers:
+  - url: /
+tags:
+  - name: Payments
+  - name: Reports
+  - name: Ops
+
+paths:
+  /v1/payments:
+    get:
+      tags: [Payments]
+      summary: List recent payments (most recently recorded first)
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 50 } }
+      responses:
+        '200':
+          description: Payments
+          content:
+            application/json:
+              schema: { type: object, properties: { payments: { type: array, items: { $ref: '#/components/schemas/Payment' } } } }
+    post:
+      tags: [Payments]
+      summary: Capture a payment
+      description: |
+        Records that a customer payment was captured for a merchant (typically forwarded from a PSP webhook).
+        `amount` is the gross the customer paid, **tax included**. The service extracts the tax, takes the MoR fee
+        (a % of gross from config) and credits the remainder to the merchant, in one balanced journal entry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaptureRequest' }
+            example:
+              paymentId: pay_1001
+              merchantId: acme
+              amount: 12100
+              currency: EUR
+              taxRate: "0.21"
+              taxJurisdiction: NL
+              capturedAt: "2026-10-14T10:00:00Z"
+      responses:
+        '201': { description: Captured, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        '200': { description: Replay of an already recorded capture, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /v1/payments/{paymentId}:
+    get:
+      tags: [Payments]
+      summary: Get a payment with its refunds
+      parameters: [ { $ref: '#/components/parameters/PaymentId' } ]
+      responses:
+        '200': { description: The payment, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /v1/payments/{paymentId}/refunds:
+    post:
+      tags: [Payments]
+      summary: Refund a captured payment (full or partial)
+      description: |
+        Omit `amount` to refund everything that is still refundable. A partial refund is split across tax, fee and
+        merchant in proportion to what remains of each (largest remainder), so a series of refunds always adds up
+        exactly. Whether the MoR fee is returned depends on the payment's `refundFeePolicy`, fixed at capture.
+      parameters: [ { $ref: '#/components/parameters/PaymentId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefundRequest' }
+            example: { refundId: ref_1001_a, amount: 6050 }
+      responses:
+        '201': { description: Refunded, content: { application/json: { schema: { $ref: '#/components/schemas/RefundResponse' } } } }
+        '200': { description: Replay of an already recorded refund, content: { application/json: { schema: { $ref: '#/components/schemas/RefundResponse' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /v1/reports/balances:
+    get:
+      tags: [Reports]
+      summary: What the MoR owes tax authorities and merchants
+      description: Every figure is a sum of ledger postings. `asOf` filters by event time (capturedAt / refundedAt).
+      parameters:
+        - { name: asOf, in: query, required: false, schema: { type: string, format: date-time }, example: "2026-10-14T23:59:59Z" }
+        - { name: currency, in: query, required: false, schema: { type: string }, example: EUR }
+      responses:
+        '200': { description: Balances, content: { application/json: { schema: { $ref: '#/components/schemas/Balances' } } } }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /v1/journal:
+    get:
+      tags: [Reports]
+      summary: Journal entries with their debit and credit lines (most recent first)
+      parameters:
+        - { name: paymentId, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
+      responses:
+        '200': { description: Entries, content: { application/json: { schema: { $ref: '#/components/schemas/Journal' } } } }
+
+  /health:
+    get:
+      tags: [Ops]
+      summary: Liveness and database check
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok } } } } } }
+
+components:
+  parameters:
+    PaymentId: { name: paymentId, in: path, required: true, schema: { type: string }, example: pay_1001 }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Id:
+      type: string
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$'
+
+    CaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [paymentId, merchantId, amount, currency, taxRate, taxJurisdiction]
+      properties:
+        paymentId: { $ref: '#/components/schemas/Id' }
+        merchantId: { $ref: '#/components/schemas/Id' }
+        amount: { type: integer, format: int64, minimum: 1, description: Gross paid by the customer, tax included, in minor units }
+        currency: { type: string, example: EUR, description: ISO 4217 }
+        taxRate: { type: string, example: "0.21", description: 'Fraction in [0, 1), up to 6 decimals' }
+        taxJurisdiction: { type: string, example: NL, pattern: '^[A-Z]{2}(-[A-Z0-9]{1,3})?$', description: 'ISO 3166-1 alpha-2, optionally with a subdivision (US-CA)' }
+        capturedAt: { type: string, format: date-time, description: Event time; defaults to now; must not be in the future }
+
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [refundId]
+      properties:
+        refundId: { $ref: '#/components/schemas/Id' }
+        amount: { type: integer, format: int64, minimum: 1, description: Omit for a full refund of what remains }
+        refundedAt: { type: string, format: date-time, description: Event time; defaults to now; not before capturedAt }
+
+    Parts:
+      type: object
+      properties:
+        amount: { type: integer, format: int64 }
+        taxAmount: { type: integer, format: int64 }
+        feeAmount: { type: integer, format: int64 }
+        merchantAmount: { type: integer, format: int64 }
+
+    Refund:
+      type: object
+      properties:
+        refundId: { type: string }
+        paymentId: { type: string }
+        amount: { type: integer, format: int64 }
+        taxAmount: { type: integer, format: int64 }
+        feeAmount: { type: integer, format: int64 }
+        merchantAmount: { type: integer, format: int64 }
+        refundedAt: { type: string, format: date-time }
+        recordedAt: { type: string, format: date-time }
+
+    Payment:
+      type: object
+      properties:
+        paymentId: { type: string }
+        merchantId: { type: string }
+        currency: { type: string }
+        status: { type: string, enum: [CAPTURED, PARTIALLY_REFUNDED, REFUNDED] }
+        amount: { type: integer, format: int64 }
+        taxAmount: { type: integer, format: int64 }
+        feeAmount: { type: integer, format: int64 }
+        merchantAmount: { type: integer, format: int64 }
+        taxRate: { type: string }
+        taxJurisdiction: { type: string }
+        feeRate: { type: string }
+        refundFeePolicy: { type: string, enum: [MOR_KEEPS_FEE, MOR_RETURNS_FEE] }
+        capturedAt: { type: string, format: date-time }
+        recordedAt: { type: string, format: date-time }
+        refunded: { $ref: '#/components/schemas/Parts' }
+        refundable: { $ref: '#/components/schemas/Parts' }
+        refunds: { type: array, items: { $ref: '#/components/schemas/Refund' } }
+
+    RefundResponse:
+      type: object
+      properties:
+        refund: { $ref: '#/components/schemas/Refund' }
+        payment: { $ref: '#/components/schemas/Payment' }
+
+    Balances:
+      type: object
+      properties:
+        asOf: { type: string, format: date-time, nullable: true }
+        taxAuthorities:
+          type: array
+          items:
+            type: object
+            properties:
+              jurisdiction: { type: string }
+              currency: { type: string }
+              amountOwed: { type: integer, format: int64 }
+        merchants:
+          type: array
+          items:
+            type: object
+            properties:
+              merchantId: { type: string }
+              currency: { type: string }
+              balance: { type: integer, format: int64, description: What the MoR owes the merchant; negative when the merchant owes the MoR }
+        mor:
+          type: array
+          items:
+            type: object
+            properties:
+              currency: { type: string }
+              feeRevenue: { type: integer, format: int64 }
+              pspClearing: { type: integer, format: int64, description: Collected from customers net of refunds }
+        integrity:
+          type: object
+          properties:
+            balanced: { type: boolean, description: Sum of all postings is zero in every currency }
+            unbalancedCurrencies: { type: array, items: { type: string } }
+
+    Journal:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer, format: int64 }
+              kind: { type: string, enum: [CAPTURE, REFUND] }
+              paymentId: { type: string }
+              refundId: { type: string, nullable: true }
+              effectiveAt: { type: string, format: date-time }
+              recordedAt: { type: string, format: date-time }
+              postings:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    account: { type: string, example: 'merchant_payable:acme' }
+                    currency: { type: string }
+                    debit: { type: integer, format: int64, nullable: true }
+                    credit: { type: integer, format: int64, nullable: true }
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, payment_not_found, idempotency_conflict, refund_exceeds_refundable, payment_fully_refunded, refund_before_capture, amount_too_small, internal_error]
+        message: { type: string }

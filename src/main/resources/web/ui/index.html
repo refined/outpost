@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MoR Ledger Console</title>
+    <link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<header>
+    <div>
+        <h1>MoR Ledger Console</h1>
+        <p class="sub">Simulate PSP events and watch the ledger. Every action calls the public API.</p>
+    </div>
+    <nav>
+        <span id="health" class="pill">checking…</span>
+        <a href="/docs/" target="_blank" rel="noopener">API docs</a>
+    </nav>
+</header>
+
+<main>
+    <section class="col">
+        <div class="card">
+            <h2>Capture a payment</h2>
+            <form id="capture-form">
+                <label>Merchant <input name="merchantId" value="acme" required></label>
+                <div class="row">
+                    <label>Amount paid (tax incl.) <input name="amount" value="121.00" inputmode="decimal" required></label>
+                    <label>Currency
+                        <select name="currency">
+                            <option>EUR</option><option>USD</option><option>GBP</option><option>SEK</option><option>JPY</option>
+                        </select>
+                    </label>
+                </div>
+                <div class="row">
+                    <label>Tax rate % <input name="taxRate" value="21" inputmode="decimal" required></label>
+                    <label>Jurisdiction <input name="taxJurisdiction" value="NL" required></label>
+                </div>
+                <label>Captured at <span class="hint">(empty = now)</span> <input name="capturedAt" type="datetime-local"></label>
+                <label>Payment id <span class="hint">(empty = generated)</span> <input name="paymentId" placeholder="pay_…"></label>
+                <div class="actions">
+                    <button type="submit">Capture</button>
+                    <button type="button" id="replay" class="ghost" disabled title="Send the last capture again">Replay last</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Refund</h2>
+            <form id="refund-form">
+                <label>Payment <select name="paymentId" id="refund-payment" required></select></label>
+                <p id="refundable" class="hint"></p>
+                <div class="row">
+                    <label>Amount <span class="hint">(empty = all that remains)</span> <input name="amount" inputmode="decimal"></label>
+                    <label>Refunded at <span class="hint">(empty = now)</span> <input name="refundedAt" type="datetime-local"></label>
+                </div>
+                <div class="actions"><button type="submit">Refund</button></div>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>Demo scenario</h2>
+            <p class="hint">Two merchants, two currencies, three jurisdictions; a partial and a full refund, then a replay and a conflict.</p>
+            <div class="actions"><button id="scenario" type="button">Run scenario</button></div>
+        </div>
+
+        <div class="card">
+            <h2>API log</h2>
+            <ol id="log" class="log"></ol>
+        </div>
+    </section>
+
+    <section class="col wide">
+        <div class="card">
+            <div class="card-head">
+                <h2>Balances report</h2>
+                <label class="inline">as of <input id="as-of" type="datetime-local"></label>
+                <span id="integrity" class="pill"></span>
+            </div>
+            <div class="grid3">
+                <div>
+                    <h3>Owed to tax authorities</h3>
+                    <table id="tax-table"><thead><tr><th>Jurisdiction</th><th class="num">Owed</th></tr></thead><tbody></tbody></table>
+                </div>
+                <div>
+                    <h3>Owed to merchants</h3>
+                    <table id="merchant-table"><thead><tr><th>Merchant</th><th class="num">Balance</th></tr></thead><tbody></tbody></table>
+                </div>
+                <div>
+                    <h3>MoR</h3>
+                    <table id="mor-table"><thead><tr><th>Ccy</th><th class="num">Fee revenue</th><th class="num">Clearing</th></tr></thead><tbody></tbody></table>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Payments</h2>
+            <table id="payments-table">
+                <thead><tr>
+                    <th>Payment</th><th>Merchant</th><th class="num">Gross</th><th class="num">Tax</th><th class="num">Fee</th>
+                    <th class="num">Merchant</th><th class="num">Refundable</th><th>Status</th><th>Fee policy</th>
+                </tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <h2>Journal <span class="hint">(most recent first; every entry balances)</span></h2>
+            <table id="journal-table">
+                <thead><tr><th>#</th><th>Kind</th><th>Payment / refund</th><th>Effective</th><th>Account</th><th class="num">Debit</th><th class="num">Credit</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </section>
+</main>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

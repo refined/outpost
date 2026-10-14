@@ -7,10 +7,14 @@ import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.RefundCommand
 import io.github.refined.morledger.payments.ValidationException
 import io.github.refined.morledger.reports.BalanceReport
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
+import io.ktor.server.http.content.staticResources
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondRedirect
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
@@ -26,6 +30,15 @@ data class HealthResponse(val status: String)
 
 fun Application.routes(dataSource: DataSource, payments: PaymentService, reports: BalanceReport) {
     routing {
+        // Demo console, API docs and the OpenAPI spec (static files from src/main/resources/web).
+        get("/") { call.respondRedirect("/ui/") }
+        staticResources("/ui", "web/ui")
+        staticResources("/docs", "web/docs")
+        get("/openapi.yaml") {
+            val spec = Application::class.java.classLoader.getResource("web/openapi.yaml")!!.readText()
+            call.respondText(spec, ContentType.parse("application/yaml"))
+        }
+
         get("/health") {
             dataSource.transaction { conn -> conn.createStatement().use { it.execute("SELECT 1") } }
             call.respond(HealthResponse("ok"))
@@ -47,6 +60,11 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
                     ),
                 )
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toDto())
+            }
+
+            get("/payments") {
+                val limit = parseLimit(call.request.queryParameters["limit"], default = 50)
+                call.respond(PaymentsResponse(payments.recent(limit).map { it.toDto() }))
             }
 
             get("/payments/{paymentId}") {
@@ -75,9 +93,7 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
 
             get("/journal") {
                 val paymentId = call.request.queryParameters["paymentId"]
-                val limit = call.request.queryParameters["limit"]?.let {
-                    it.toIntOrNull()?.takeIf { n -> n in 1..1000 } ?: throw ValidationException("limit must be 1..1000")
-                } ?: 100
+                val limit = parseLimit(call.request.queryParameters["limit"], default = 100)
                 val entries = dataSource.transaction { Ledger.entries(it, paymentId, limit) }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
@@ -92,6 +108,10 @@ private fun parseInstant(field: String, value: String?): Instant? = value?.let {
         throw ValidationException("$field must be an ISO-8601 UTC timestamp, e.g. 2026-10-14T10:00:00Z")
     }
 }
+
+private fun parseLimit(value: String?, default: Int): Int = value?.let {
+    it.toIntOrNull()?.takeIf { n -> n in 1..1000 } ?: throw ValidationException("limit must be 1..1000")
+} ?: default
 
 private fun parseRate(field: String, value: String): BigDecimal =
     value.toBigDecimalOrNull() ?: throw ValidationException("$field must be a decimal string, e.g. \"0.21\"")
