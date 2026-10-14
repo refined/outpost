@@ -12,7 +12,7 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a balances report: tax owed to authorities, merchant balances.
 - **Spec:** [docs/requirements.md](docs/requirements.md).
 - **Target date:** 2026-10-19.
-- **Status:** skeleton. `/health` works. Capture, refund and report are `501` stubs. The ledger schema is not written yet. CI runs on Linux, macOS and Windows.
+- **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency) and extras (`asOf` reports, journal endpoint, demo console `/ui`, Swagger `/docs`). 40 tests; CI runs on Linux, macOS and Windows. What remains is polish and interview prep.
 - **Platforms:** must build, test and run on macOS, Linux and Windows.
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -29,18 +29,25 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | CI | GitHub Actions, `.github/workflows/ci.yml` | Ubuntu (JDK 17 + 25), macOS, Windows |
 | Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `gradle/libs.versions.toml` | Gradle is not installed globally; always use `./gradlew` |
 
-There is no DI framework: the app is wired by hand in `Application.module(dataSource)`. Keep dependencies minimal, and justify any new one.
+There is no DI framework: the app is wired by hand in `Application.module(dataSource, pricing, clock)`. Keep dependencies minimal, and justify any new one.
 
 ## Layout
 
 ```
 src/main/kotlin/io/github/refined/morledger/
-  Application.kt        main(), AppConfig (env), Application.module()
-  api/Routes.kt         HTTP routes
-  db/Database.kt        Hikari + Flyway, DataSource.transaction { }
+  Application.kt              main(), AppConfig (env), Application.module()
+  money/Allocation.kt         pure money math: capture split, refund apportionment, RefundFeePolicy
+  ledger/Ledger.kt            generic double-entry engine (knows nothing about payments)
+  ledger/ChartOfAccounts.kt   account codes + postings for capture/refund
+  payments/                   PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
+  reports/BalanceReport.kt    ledger balances -> report
+  api/                        Routes, Dto (wire format), Errors (DomainException -> HTTP status)
+  db/Database.kt              Hikari + Flyway, DataSource.transaction { }
 src/main/resources/
-  db/migration/         Flyway migrations V{n}__*.sql
+  db/migration/               V1 baseline, V2 ledger + payments/refunds (constraints, triggers)
+  web/                        ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
   logback.xml
+docs/demo.http              demo scenario as HTTP requests
 src/test/kotlin/...     tests; TestDatabase = one shared, migrated Postgres per test JVM
 .github/workflows/      CI
 docs/requirements.md    what we build and why
@@ -56,13 +63,15 @@ docker compose up -d --wait   # Postgres on 127.0.0.1:5442 (db/user/password: mo
 ./gradlew run                 # service on http://localhost:8090
 ```
 
-Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`.
+Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`).
+
+URLs: `/ui/` demo console, `/docs/` Swagger, `/openapi.yaml` spec. **Keep `openapi.yaml` in sync with `api/Dto.kt` and `api/Routes.kt`.**
 
 Tests use `TestDatabase`:
 - if `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`) is set, they use that database;
 - otherwise they start Postgres via Testcontainers.
 
-Tests create tables, so point `TEST_DB_URL` at a dedicated database, not the dev one.
+Tests create and **truncate** tables (`TestDatabase.reset()`), so point `TEST_DB_URL` at a dedicated database, never the dev one.
 
 ## CI
 
@@ -84,6 +93,7 @@ Rules:
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.
 - The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run `./gradlew build` before pushing.
+- `./gradlew run` started from a background shell leaves its JVM running when the shell is killed (Windows). Before restarting, free port 8090: find the `java.exe` owning it and stop it, or you will be testing the old build.
 
 ## Coding conventions
 
@@ -102,60 +112,47 @@ Rules:
 - **Tests:** money flows are covered by integration tests against real Postgres.
 - **Docs:** every ambiguity decision goes into the README "Assumptions" section; key trade-offs go into "Trade-offs".
 
-## Domain model (draft)
+## Domain model
 
-**Chart of accounts (per currency).** "Normal" is the side on which the account's balance is positive.
+The README is the reviewer-facing source of truth (worked example, Assumptions, Trade-offs). This is the short version.
 
-| Account | Type | Normal | Meaning |
-|---|---|---|---|
-| `psp_clearing` | asset | debit | Money collected from customers, held at or receivable from the PSP |
-| `tax_payable:{jurisdiction}` | liability | credit | Tax owed to an authority |
-| `merchant_payable:{merchantId}` | liability | credit | What the MoR owes the merchant |
-| `fee_revenue` | revenue | credit | The MoR's fee |
+**Chart of accounts (per currency).** Signed postings: debit > 0, credit < 0.
 
-**Capture.** Gross G, tax T, fee F; one journal entry:
-
-| Side | Account | Amount |
+| Account | Kind | Normal |
 |---|---|---|
-| Dr | `psp_clearing` | G |
-| Cr | `tax_payable:{jurisdiction}` | T |
-| Cr | `fee_revenue` | F |
-| Cr | `merchant_payable:{merchantId}` | G − T − F |
+| `psp_clearing` | asset | debit |
+| `tax_payable:{jurisdiction}` | liability | credit |
+| `merchant_payable:{merchantId}` | liability | credit |
+| `fee_revenue` | revenue | credit |
 
-**Refund.** A new entry that reverses the capture: the full amounts for a full refund, proportional amounts for a partial one. How the fee is treated is an open question (below).
+- **Capture** (gross G = tax T + fee F + merchant M): Dr clearing G / Cr tax T, Cr fee F, Cr merchant M.
+- **Refund r:** the mirror image for the refunded parts (`ChartOfAccounts.refund`).
+- **Report:** a pure read: tax owed and merchant balances are the credit balances of their accounts.
 
-**Report:**
-- tax owed = the credit balance of each `tax_payable:*` account;
-- merchant balance = the credit balance of each `merchant_payable:*` account.
+## Decisions (resolved 2026-10-14)
 
-See [docs/domain/design-options.md](docs/domain/design-options.md) (section D5) for a worked example with VAT.
+| # | Topic | Decision |
+|---|---|---|
+| 1 | Capture amount | Gross paid by the customer, **tax-inclusive**, plus `taxRate`; tax = G·r/(1+r) |
+| 2 | Fee base | % of **gross**, `MOR_FEE_RATE` (default 0.05, max 0.5) |
+| 3 | Fee on refund | `REFUND_FEE_POLICY`: `MOR_KEEPS_FEE` (default; the merchant bears it) or `MOR_RETURNS_FEE` |
+| 4 | Terms snapshot | Fee rate and policy are stored on each payment at capture; config changes never affect past payments |
+| 5 | Rounding | HALF_UP for tax and fee; the merchant gets the remainder |
+| 6 | Partial refunds | Largest-remainder apportionment over what is still refundable; the last refund takes exactly the rest; ties merchant → fee → tax |
+| 7 | Idempotency | External ids (`paymentId`, `refundId`) + a SHA-256 request fingerprint: replay → 200 with the stored result, different payload → 409 |
+| 8 | Refund guards | 404 unknown payment; 422 `refund_exceeds_refundable`, `payment_fully_refunded`, `refund_before_capture` |
+| 9 | Negative merchant balance | Allowed and reported |
+| 10 | Jurisdiction | Required on capture; ISO 3166 (`NL`, `US-CA`) |
+| 11 | Currency | Multi-currency, no FX; accounts per (code, currency) |
+| 12 | Concurrency | Refund = `SELECT … FOR UPDATE` on the payment; capture = `INSERT … ON CONFLICT DO NOTHING` + fingerprint compare |
+| 13 | Time | `effective_at` (event time, `asOf` filters on it) and `recorded_at`; future event times → 400 (5 min skew) |
+| 14 | JSON | Strict: unknown fields → 400; amounts are integers; rates are decimal strings |
+| 15 | Ledger engine | Own, on Postgres; DB enforces balance (deferred constraint trigger) and append-only (triggers); TRUNCATE allowed for tests |
+| 16 | Demo | `/ui` vanilla JS console + `/docs` Swagger (swagger-ui-dist from jsDelivr, pinned 5.33.0); no extra Gradle dependency |
 
-## Ledger choice
+## Ideas not done (candidates if time allows)
 
-**Our own double-entry ledger on Postgres.**
-
-Why:
-- the business record and its postings commit atomically in one transaction, with no dual write;
-- the domain modelling stays visible;
-- it is one container to run.
-
-Alternatives to discuss in the README:
-- **TigerBeetle:** strong guarantees, built for very high throughput, but the metadata store is separate (dual write) and there is one more process to run;
-- **Formance:** a ready ledger API with Numscript, but a separate service to run, and less of our own modelling shows.
-
-The ledger sits behind a small internal interface, so it could be swapped.
-
-## Open questions (decide, then document in the README)
-
-1. **Tax-inclusive or tax-exclusive amounts on capture.** Does the event carry the gross amount, or net plus rate?
-2. **Fee base:** a % of net (excluding tax) or of gross.
-3. **Fee on refund:** does the MoR return its fee (Dr `fee_revenue`), or does the merchant bear it?
-4. **Rounding:** the rule (HALF_EVEN vs HALF_UP), and which line absorbs the remainder.
-5. **Idempotency:** a client `Idempotency-Key` header vs an external payment/event id; what a duplicate with a different payload returns.
-6. **Refund guards:** refunding more than was captured, a second full refund, a refund of an unknown payment.
-7. **Negative merchant balance:** allowed, e.g. a refund after a payout.
-8. **Tax jurisdiction:** sent on capture (country code) or one implicit authority.
-9. **Fee configuration:** global config or per merchant.
-10. **Currency:** single now; with multi-currency, balances are per currency and there is no FX.
-11. **Concurrency:** lock the payment row on refund so that concurrent partial refunds can't exceed the captured amount.
-12. **Time:** event timestamps vs recording timestamps, and reporting "as of" a date.
+- Running balances per account (materialised in the same tx) instead of SUM on read.
+- Bitemporal `asOf` + `knownAt` reporting; closed periods.
+- Payout / settlement / tax remittance entries (designs are in the README's out-of-scope table).
+- Per-merchant pricing (a contract table) instead of global config.
