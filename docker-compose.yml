@@ -23,7 +23,7 @@ services:
       retries: 15
 
   app:
-    build: ./service
+    build: .
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-mor_ledger}
       DB_USER: ${POSTGRES_USER:-mor}
@@ -55,7 +55,7 @@ services:
   test:
     profiles: [test]
     build:
-      context: ./service
+      context: .
       target: build
     command: ["gradle", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
     environment:

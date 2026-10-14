@@ -23,18 +23,18 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | Language | Kotlin 2.4, JVM target 17 | Builds with any JDK 17+ |
 | HTTP | Ktor 3 (Netty), kotlinx.serialization | |
 | DB access | Plain JDBC + HikariCP | No ORM: SQL and transaction boundaries stay explicit |
-| Migrations | Flyway (`service/src/main/resources/db/migration`) | |
+| Migrations | Flyway (`src/main/resources/db/migration`) | |
 | Database | PostgreSQL 17 (docker-compose) | |
 | Tests | JUnit 6, Ktor `testApplication`, Testcontainers | In Docker: compose `test` service with `TEST_DB_URL`; on a host: Testcontainers |
 | CI | GitHub Actions, `.github/workflows/ci.yml` | One docker compose job: build image, smoke test through the API, tests in Docker |
-| Runtime | Docker: `service/Dockerfile` (multi-stage) + root `docker-compose.yml` + optional `.env` (`.env.example`) | Host needs only Docker |
-| Build | Gradle 9.8.1 from the official `gradle:9.8.1-jdk21` Docker image; Kotlin DSL; versions inline in `service/build.gradle.kts` | **No wrapper** (user decision: everything via Docker). Host builds need a local Gradle 9 |
+| Runtime | Docker: `Dockerfile` (multi-stage) + `docker-compose.yml` + optional `.env` (`.env.example`) | Host needs only Docker |
+| Build | Gradle 9.8.1 from the official `gradle:9.8.1-jdk21` Docker image; Kotlin DSL; versions inline in `build.gradle.kts` | **No wrapper** (user decision: everything via Docker). Host builds need a local Gradle 9 |
 
 There is no DI framework: the app is wired by hand in `Application.module(dataSource, pricing, clock)`. Keep dependencies minimal, and justify any new one.
 
 ## Layout
 
-The root holds only what is needed to run and read the project; the Gradle project lives in `service/`. Keep the root that way.
+A standard single-module Gradle layout at the root, so IntelliJ opens it as a Gradle project with no setup. (A `service/` subfolder was tried on 2026-10-14 and reverted: IDEA lost the Gradle import.) Keep the root minimal and add no new top-level files without a reason.
 
 ```
 docker-compose.yml               the whole stack (postgres, app, test profile); settings from optional .env
@@ -45,20 +45,21 @@ docs/design.md                   all decisions and trade-offs, tests, CI, config
 docs/demo.http                   demo scenario as HTTP requests
 docs/domain/                     MoR background: VAT, money flows, ledger posting examples
 .github/workflows/ci.yml         CI
-service/                         Gradle project: build.gradle.kts, settings.gradle.kts, Dockerfile, .dockerignore, .editorconfig (no wrapper)
-  src/main/kotlin/io/github/refined/morledger/
-    Application.kt               main(), AppConfig (env), Application.module()
-    money/Allocation.kt          pure money math: capture split, refund apportionment, RefundFeePolicy
-    ledger/Ledger.kt             generic double-entry engine (knows nothing about payments); running balances, verify
-    ledger/ChartOfAccounts.kt    account codes + postings for capture/refund
-    payments/                    PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
-    reports/BalanceReport.kt     ledger balances -> report
-    api/                         Routes, Dto (wire format), Errors (DomainException -> HTTP status)
-    db/Database.kt               Hikari + Flyway, DataSource.transaction { }
-  src/main/resources/
-    db/migration/                V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
-    web/                         ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
-  src/test/kotlin/...            tests; TestDatabase = one shared, migrated Postgres per test JVM
+build.gradle.kts, settings.gradle.kts  Gradle build (no wrapper; versions inline)
+Dockerfile, .dockerignore        image build (gradle:9.8.1-jdk21 -> JRE 21)
+src/main/kotlin/io/github/refined/morledger/
+  Application.kt                 main(), AppConfig (env), Application.module()
+  money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
+  ledger/Ledger.kt               generic double-entry engine (knows nothing about payments); running balances, verify
+  ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
+  payments/                      PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
+  reports/BalanceReport.kt       ledger balances -> report
+  api/                           Routes, Dto (wire format), Errors (DomainException -> HTTP status)
+  db/Database.kt                 Hikari + Flyway, DataSource.transaction { }
+src/main/resources/
+  db/migration/                  V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
+  web/                           ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
+src/test/kotlin/...              tests; TestDatabase = one shared, migrated Postgres per test JVM
 ```
 
 ## Commands
@@ -76,7 +77,6 @@ Host workflow (optional, for fast edit-run loops; needs JDK 17+ and Gradle 9 ins
 
 ```bash
 docker compose up -d --wait postgres
-cd service
 gradle build                  # compile + tests (Testcontainers)
 gradle run                    # service on http://localhost:8090 (stop the app container first: same port)
 ```
