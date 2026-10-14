@@ -14,67 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: ${{ matrix.os }} · JDK ${{ matrix.java }} · ${{ matrix.db }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Linux: the same path as local development — Testcontainers starts Postgres in Docker.
-          - { os: ubuntu-latest, java: "17", db: testcontainers }
-          - { os: ubuntu-latest, java: "25", db: testcontainers }
-          # macOS/Windows runners have no Docker for Linux containers, so tests use a native Postgres.
-          - { os: macos-latest, java: "17", db: native-postgres }
-          - { os: windows-latest, java: "17", db: native-postgres }
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java }}
-
-      - uses: gradle/actions/setup-gradle@v6
-
-      - name: Start native PostgreSQL
-        if: matrix.db == 'native-postgres'
-        uses: ikalnytskyi/action-setup-postgres@v8
-        with:
-          username: mor
-          password: mor
-          database: mor_ledger
-          postgres-version: "17"
-
-      - name: Point tests at the native PostgreSQL
-        if: matrix.db == 'native-postgres'
-        shell: bash
-        run: |
-          echo "TEST_DB_URL=jdbc:postgresql://localhost:5432/mor_ledger" >> "$GITHUB_ENV"
-          echo "TEST_DB_USER=mor" >> "$GITHUB_ENV"
-          echo "TEST_DB_PASSWORD=mor" >> "$GITHUB_ENV"
-
-      - name: Build and test (gradlew)
-        if: runner.os != 'Windows'
-        working-directory: service
-        run: ./gradlew build
-
-      - name: Build and test (gradlew.bat)
-        if: runner.os == 'Windows'
-        shell: cmd
-        working-directory: service
-        run: gradlew.bat build
-
-      - name: Upload test reports
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
-          path: service/build/reports/tests/
-
-  # The Docker-only path from the README: no JDK on the host, everything via docker compose.
+  # The same path as the README: everything through docker compose, nothing installed on the runner.
   docker:
     name: docker compose · image, smoke test, test suite
     runs-on: ubuntu-latest

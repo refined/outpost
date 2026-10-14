@@ -12,8 +12,8 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a balances report: tax owed to authorities, merchant balances.
 - **Spec:** [docs/requirements.md](docs/requirements.md).
 - **Target date:** 2026-10-19.
-- **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency) and extras (`asOf` reports, journal endpoint, demo console `/ui`, Swagger `/docs`). 43 tests; CI runs on Linux, macOS and Windows. What remains is polish and interview prep.
-- **Platforms:** must build, test and run on macOS, Linux and Windows.
+- **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency) and extras (`asOf` reports, journal endpoint, demo console `/ui`, Swagger `/docs`). 43 tests; CI runs the Docker path (build, smoke test, tests in Docker). What remains is polish and interview prep.
+- **Platforms:** must run on macOS, Linux and Windows. This is guaranteed by running everything in Linux containers (Docker / Docker Desktop).
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
 ## Stack
@@ -25,10 +25,10 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | DB access | Plain JDBC + HikariCP | No ORM: SQL and transaction boundaries stay explicit |
 | Migrations | Flyway (`service/src/main/resources/db/migration`) | |
 | Database | PostgreSQL 17 (docker-compose) | |
-| Tests | JUnit 6, Ktor `testApplication`, Testcontainers | Docker by default; or an external Postgres via `TEST_DB_URL` |
-| CI | GitHub Actions, `.github/workflows/ci.yml` | Gradle on Ubuntu (JDK 17 + 25), macOS, Windows; plus a docker compose job |
+| Tests | JUnit 6, Ktor `testApplication`, Testcontainers | In Docker: compose `test` service with `TEST_DB_URL`; on a host: Testcontainers |
+| CI | GitHub Actions, `.github/workflows/ci.yml` | One docker compose job: build image, smoke test through the API, tests in Docker |
 | Runtime | Docker: `service/Dockerfile` (multi-stage) + root `docker-compose.yml` + optional `.env` (`.env.example`) | Host needs only Docker |
-| Build | Gradle 9 via wrapper, Kotlin DSL, version catalog `service/gradle/libs.versions.toml` | The Gradle project is `service/`; Gradle is not installed globally, so use `./gradlew` from `service/` |
+| Build | Gradle 9.8.1 from the official `gradle:9.8.1-jdk21` Docker image; Kotlin DSL; versions inline in `service/build.gradle.kts` | **No wrapper** (user decision: everything via Docker). Host builds need a local Gradle 9 |
 
 There is no DI framework: the app is wired by hand in `Application.module(dataSource, pricing, clock)`. Keep dependencies minimal, and justify any new one.
 
@@ -41,10 +41,11 @@ docker-compose.yml               the whole stack (postgres, app, test profile); 
 .env.example                     every compose setting with its default (.env is gitignored)
 README.md, AGENTS.md, CLAUDE.md  docs for reviewers / agents (CLAUDE.md just imports this file)
 docs/requirements.md             what we build and why
+docs/design.md                   all decisions and trade-offs, tests, CI, configuration, code layout (README details)
 docs/demo.http                   demo scenario as HTTP requests
 docs/domain/                     MoR background: VAT, money flows, ledger posting examples
 .github/workflows/ci.yml         CI
-service/                         Gradle project: build.gradle.kts, settings, wrapper, Dockerfile, .dockerignore, .editorconfig
+service/                         Gradle project: build.gradle.kts, settings.gradle.kts, Dockerfile, .dockerignore, .editorconfig (no wrapper)
   src/main/kotlin/io/github/refined/morledger/
     Application.kt               main(), AppConfig (env), Application.module()
     money/Allocation.kt          pure money math: capture split, refund apportionment, RefundFeePolicy
@@ -62,7 +63,7 @@ service/                         Gradle project: build.gradle.kts, settings, wra
 
 ## Commands
 
-**Everything runs in Docker** (user requirement: the host needs only Docker). Multi-stage `Dockerfile`: `build` stage = JDK 21 + Gradle wrapper; runtime = JRE 21, non-root user, healthcheck on `/health`.
+**Everything runs in Docker** (user requirement: the host needs only Docker). Multi-stage `Dockerfile`: `build` stage = `gradle:9.8.1-jdk21`; runtime = JRE 21, non-root user, healthcheck on `/health`.
 
 ```bash
 docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + app (127.0.0.1:8090)
@@ -71,13 +72,13 @@ docker compose logs -f app
 docker compose --profile test down               # stop everything incl. postgres-test; -v also drops pgdata
 ```
 
-Host-JDK workflow (optional, for fast edit-run loops):
+Host workflow (optional, for fast edit-run loops; needs JDK 17+ and Gradle 9 installed):
 
 ```bash
 docker compose up -d --wait postgres
 cd service
-./gradlew build               # compile + tests (Testcontainers)
-./gradlew run                 # service on http://localhost:8090 (stop the app container first: same port)
+gradle build                  # compile + tests (Testcontainers)
+gradle run                    # service on http://localhost:8090 (stop the app container first: same port)
 ```
 
 Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`).
@@ -88,29 +89,28 @@ Tests use `TestDatabase`:
 - if `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`) is set, they use that database;
 - otherwise they start Postgres via Testcontainers.
 
-Tests create and **truncate** tables (`TestDatabase.reset()`), so point `TEST_DB_URL` at a dedicated database, never the dev one.
+With `TEST_DB_URL`, tests **drop and recreate the schema** first and truncate tables between tests (`TestDatabase.reset()`), so point it at a dedicated database, never the dev one.
 
 ## CI
 
-`.github/workflows/ci.yml` runs `./gradlew build` (in `service/`) on push to `main`, on PRs and on manual dispatch. The matrix:
-- Ubuntu with JDK 17 and JDK 25 (Testcontainers);
-- macOS with JDK 17 (native Postgres via `ikalnytskyi/action-setup-postgres`);
-- Windows with JDK 17 (native Postgres, run through `gradlew.bat`).
+`.github/workflows/ci.yml` has one job, the same path as the README. It runs on push to `main`, on PRs and on manual dispatch:
+- `docker compose up -d --build --wait`;
+- an API smoke test (capture → refund → balanced report → `/ui/`);
+- `docker compose --profile test run --rm test`.
 
-GitHub's macOS/Windows runners cannot run Linux containers, so they use native Postgres. On failure, the test reports are uploaded as artifacts.
+On failure it prints the container logs. Until 2026-10-14 there was also a Gradle matrix (Ubuntu JDK 17/25, macOS, Windows with native Postgres). It was dropped with the wrapper, because the host path is no longer the delivered one.
 
 Rules:
 - Code must stay cross-platform: no shell-specific build steps; use `java.nio.file` paths, not string concatenation.
-- `service/gradlew` must keep its executable bit (`git update-index --chmod=+x service/gradlew`); git on Windows drops it easily.
 - A new test that needs the database uses `TestDatabase.dataSource`; never start a separate container per test class.
 
 ## Environment notes
 
-- The development machine runs Windows. Git Bash and PowerShell are both available; in PowerShell, use `.\gradlew.bat`.
+- The development machine runs Windows. Git Bash and PowerShell are both available. `.gitattributes` forces LF everywhere, so Docker build inputs are the same on every OS.
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.
-- The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run the tests (`docker compose --profile test run --rm test`, or `./gradlew build` in `service/`) before pushing.
-- Prefer the Docker workflow. If you use `./gradlew run` from a background shell, killing the shell leaves the JVM running (Windows); free port 8090 (stop the `java.exe` owning it) before restarting, or you will be testing the old build.
+- The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run the tests (`docker compose --profile test run --rm test`) before pushing.
+- Prefer the Docker workflow. If you use `gradle run` from a background shell, killing the shell leaves the JVM running (Windows); free port 8090 (stop the `java.exe` owning it) before restarting, or you will be testing the old build.
 - After changing code, `docker compose up -d --build --wait` rebuilds the image; without `--build` the old image keeps running.
 
 ## Coding conventions
@@ -171,6 +171,8 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 17 | Runtime | Everything in Docker: app image + Postgres via compose; tests via the compose `test` profile; CI has a `docker` job (build, smoke test, tests in Docker) |
 | 18 | Balances | Stored running `balance` per account, updated in the same tx via atomic `UPDATE … balance = balance + x`, accounts locked in id order as the last statements; the current report reads it; `asOf` sums postings; `Ledger.verify` reconciles (used in tests). Rejected: SUM on read, snapshots, queue-fed balances, optimistic locking, app-level locks (see README Trade-offs) |
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
+| 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
+| 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → short assumptions and trade-offs. Details go to `docs/design.md` |
 
 ## Ideas not done (candidates if time allows)
 

@@ -1,5 +1,2 @@
-* text=auto
-gradlew text eol=lf
-*.sh text eol=lf
-*.bat text eol=crlf
-*.jar binary
+# LF everywhere, so files that go into Docker builds are identical on every OS.
+* text=auto eol=lf

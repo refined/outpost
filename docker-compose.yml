@@ -57,13 +57,13 @@ services:
     build:
       context: ./service
       target: build
-    command: ["./gradlew", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
+    command: ["gradle", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
     environment:
       TEST_DB_URL: jdbc:postgresql://postgres-test:5432/mor_ledger_test
       TEST_DB_USER: mor
       TEST_DB_PASSWORD: mor
     volumes:
-      - gradle-cache:/root/.gradle
+      - gradle-cache:/home/gradle/.gradle
     depends_on:
       postgres-test:
         condition: service_healthy
