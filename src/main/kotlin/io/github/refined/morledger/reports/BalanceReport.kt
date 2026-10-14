@@ -25,7 +25,7 @@ data class Balances(
     val integrity: Integrity,
 )
 
-/** The balances report is a read over the ledger: every figure is a sum of postings, nothing is stored separately. */
+/** The balances report reads the ledger: the stored running balances now, or sums of postings as of a past instant. */
 class BalanceReport(private val dataSource: DataSource) {
     fun build(asOf: Instant? = null, currency: String? = null): Balances =
         fromLedger(dataSource.transaction { Ledger.balances(it, asOf, currency) }, asOf)

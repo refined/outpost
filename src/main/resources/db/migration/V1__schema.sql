@@ -2,8 +2,12 @@
 --
 -- Invariants enforced by the database, not only by the code:
 --   * every journal entry balances (sum of signed postings = 0) and uses a single currency — checked at commit;
---   * the ledger and the business records are append-only: UPDATE and DELETE are rejected.
---     (TRUNCATE is not blocked; it is an admin operation, used by tests to reset state.)
+--   * history is append-only: UPDATE and DELETE on entries, postings, payments and refunds are rejected;
+--   * an account's identity never changes; only its running `balance` is updated, in the same transaction as
+--     the postings that move it.
+--   (TRUNCATE is not blocked; it is an admin operation, used by tests to reset state.)
+
+CREATE SCHEMA ledger;
 
 -- ─── Ledger ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -12,6 +16,7 @@ CREATE TABLE ledger.accounts (
     code        TEXT    NOT NULL,                 -- e.g. merchant_payable:m_123
     currency    CHAR(3) NOT NULL,                 -- ISO 4217; one account per (code, currency)
     normal_side TEXT    NOT NULL CHECK (normal_side IN ('DEBIT', 'CREDIT')),
+    balance     BIGINT  NOT NULL DEFAULT 0,       -- running Σ of this account's postings (debit > 0)
     UNIQUE (code, currency)
 );
 
@@ -90,7 +95,21 @@ BEGIN
 END
 $$;
 
-CREATE TRIGGER accounts_append_only BEFORE UPDATE OR DELETE ON ledger.accounts
+-- Accounts: the running balance is the only mutable column.
+CREATE FUNCTION ledger.only_balance_changes() RETURNS trigger
+    LANGUAGE plpgsql AS
+$$
+BEGIN
+    IF (NEW.id, NEW.code, NEW.currency, NEW.normal_side) IS DISTINCT FROM (OLD.id, OLD.code, OLD.currency, OLD.normal_side) THEN
+        RAISE EXCEPTION 'ledger.accounts: only balance may change' USING ERRCODE = 'restrict_violation';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE TRIGGER accounts_only_balance_changes BEFORE UPDATE ON ledger.accounts
+    FOR EACH ROW EXECUTE FUNCTION ledger.only_balance_changes();
+CREATE TRIGGER accounts_no_delete BEFORE DELETE ON ledger.accounts
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();
 CREATE TRIGGER journal_entries_append_only BEFORE UPDATE OR DELETE ON ledger.journal_entries
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();

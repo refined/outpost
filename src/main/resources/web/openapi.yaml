@@ -93,7 +93,7 @@ paths:
     get:
       tags: [Reports]
       summary: What the MoR owes tax authorities and merchants
-      description: Every figure is a sum of ledger postings. `asOf` filters by event time (capturedAt / refundedAt).
+      description: Without `asOf`, reads each account's stored running balance. With `asOf`, sums the postings of entries whose event time (capturedAt / refundedAt) is at or before it.
       parameters:
         - { name: asOf, in: query, required: false, schema: { type: string, format: date-time }, example: "2026-10-14T23:59:59Z" }
         - { name: currency, in: query, required: false, schema: { type: string }, example: EUR }

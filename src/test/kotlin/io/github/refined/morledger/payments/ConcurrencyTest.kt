@@ -44,6 +44,23 @@ class ConcurrencyTest {
         val details = service.get("p_1")
         assertEquals(9_800, details.refunded.total)
         assertTrue(BalanceReport(TestDatabase.dataSource).build().integrity.balanced)
+        TestDatabase.assertLedgerConsistent()
+    }
+
+    @Test
+    fun `parallel captures on shared accounts lose no update and do not deadlock`() {
+        // Every capture touches psp_clearing, fee_revenue and tax_payable:NL; half also share one merchant account.
+        val results = parallel(16) { i ->
+            CaptureCommand("p_$i", if (i % 2 == 0) "m_shared" else "m_$i", 10_000, "EUR", BigDecimal("0.21"), "NL", Instant.parse("2026-10-01T10:00:00Z"))
+                .let { service.capture(it) }
+        }
+
+        assertTrue(results.all { it.isSuccess }, results.mapNotNull { it.exceptionOrNull() }.toString())
+        val report = BalanceReport(TestDatabase.dataSource).build()
+        assertEquals(16 * 10_000L, report.mor.single().pspClearing)
+        assertEquals(16 * 500L, report.mor.single().feeRevenue)
+        assertEquals(8 * 7_764L, report.merchants.single { it.merchantId == "m_shared" }.balance)
+        TestDatabase.assertLedgerConsistent()
     }
 
     @Test

@@ -38,6 +38,33 @@ class LedgerTest {
     }
 
     @Test
+    fun `stored running balances equal the sum of postings`() {
+        dataSource.transaction {
+            Ledger.post(it, capture("p_1", Split(tax = 2100, fee = 605, merchant = 9395)))
+            Ledger.post(it, capture("p_2", Split(tax = 1900, fee = 595, merchant = 9405)))
+            Ledger.post(it, capture("p_3", Split(tax = 0, fee = 50, merchant = 950), currency = "USD"))
+        }
+
+        TestDatabase.assertLedgerConsistent()
+        val current = dataSource.transaction { Ledger.balances(it) }
+        val summed = dataSource.transaction { Ledger.balances(it, asOf = Instant.parse("2999-01-01T00:00:00Z")) }
+        assertEquals(summed, current)
+    }
+
+    @Test
+    fun `verify reports a stored balance that drifted from its postings`() {
+        dataSource.transaction { Ledger.post(it, capture("p_1", Split(0, 0, 100))) }
+        dataSource.transaction { conn ->
+            conn.createStatement().use { it.executeUpdate("UPDATE ledger.accounts SET balance = balance + 1 WHERE code = 'psp_clearing'") }
+        }
+
+        val mismatch = dataSource.transaction { Ledger.verify(it) }.single()
+        assertEquals("psp_clearing", mismatch.account.code)
+        assertEquals(101, mismatch.stored)
+        assertEquals(100, mismatch.fromPostings)
+    }
+
+    @Test
     fun `zero lines are dropped and entries are listed with their postings`() {
         dataSource.transaction { Ledger.post(it, capture("p_1", Split(tax = 0, fee = 0, merchant = 500))) }
 
@@ -88,19 +115,22 @@ class LedgerTest {
     }
 
     @Test
-    fun `ledger is append-only`() {
+    fun `history is append-only and accounts only change their balance`() {
         dataSource.transaction { Ledger.post(it, capture("p_1", Split(0, 0, 100))) }
 
-        for (sql in listOf(
-            "UPDATE ledger.postings SET amount = amount * 2",
-            "DELETE FROM ledger.postings",
-            "UPDATE ledger.journal_entries SET effective_at = now()",
-            "DELETE FROM ledger.journal_entries",
+        for ((sql, message) in listOf(
+            "UPDATE ledger.postings SET amount = amount * 2" to "append-only",
+            "DELETE FROM ledger.postings" to "append-only",
+            "UPDATE ledger.journal_entries SET effective_at = now()" to "append-only",
+            "DELETE FROM ledger.journal_entries" to "append-only",
+            "DELETE FROM ledger.accounts" to "append-only",
+            "UPDATE ledger.accounts SET code = 'renamed'" to "only balance may change",
+            "UPDATE ledger.accounts SET currency = 'USD'" to "only balance may change",
         )) {
             val error = assertFailsWith<SQLException>(sql) {
                 dataSource.transaction { conn -> conn.createStatement().use { it.executeUpdate(sql) } }
             }
-            assertTrue(error.message!!.contains("append-only"), error.message)
+            assertTrue(error.message!!.contains(message), error.message)
         }
     }
 }

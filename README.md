@@ -21,7 +21,7 @@ Prerequisites: **Docker only**: no JDK or Gradle on the host. Works on macOS, Li
 ```bash
 docker compose up -d --build --wait              # builds the image, starts Postgres + the service
 docker compose --profile test run --rm test      # runs the full test suite in a container, against its own Postgres
-docker compose down                              # stop (add -v to also drop the database volume)
+docker compose --profile test down               # stop everything, incl. the test database (-v also drops data)
 ```
 
 The first build downloads Gradle and the dependencies (a few minutes); later builds reuse the cache.
@@ -52,7 +52,7 @@ Storing balanced postings and summing them is the easy part: a ledger *engine* i
 4. **Concurrency.** Two partial refunds racing on one payment must not exceed what was captured.
 5. **Invariants and audit.**
    - Every entry balances; the ledger is append-only.
-   - Every reported figure is a sum of postings.
+   - Stored balances are kept in step with the postings, and can be reconciled against them.
    - Terms such as rates and policy are snapshotted on each payment.
 6. **Time.** Event time vs recording time, "balances as of" a date, and refunds dated before their capture.
 
@@ -148,9 +148,17 @@ GET /v1/reports/balances
 
 With `REFUND_FEE_POLICY=MOR_RETURNS_FEE`, the refunds also debit `fee_revenue` and every balance returns to 0.
 
-**Invariants enforced by the database**, not only by the code (see [V2__ledger.sql](src/main/resources/db/migration/V2__ledger.sql)):
+**Balances.** Each account stores its running `balance`. It moves in the **same transaction** as the postings, via an atomic `UPDATE ledger.accounts SET balance = balance + x`:
+- the current report reads it directly (O(1) per account);
+- an `asOf` report sums the postings up to that time (the history);
+- `Ledger.verify` reconciles stored balances against the postings, and the tests run it after the money flows.
+
+This is the model the established ledgers use: TigerBeetle keeps debit/credit counters on each account; Modern Treasury keeps balances on the account with a lock version.
+
+**Invariants enforced by the database**, not only by the code (see [V1__schema.sql](src/main/resources/db/migration/V1__schema.sql)):
 - **Balanced, single-currency entries.** A deferred constraint trigger checks that every journal entry balances and uses a single currency, at commit time.
-- **Append-only records.** Triggers reject `UPDATE`/`DELETE` on postings, entries, accounts, payments and refunds. Corrections are new entries.
+- **Append-only history.** Triggers reject `UPDATE`/`DELETE` on postings, entries, payments and refunds; corrections are new entries.
+- **Fixed account identity.** On accounts, only `balance` may change.
 - **Splits add up.** `CHECK`s require each payment's and refund's parts to sum to its amount.
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
@@ -190,10 +198,19 @@ Where the brief is open, these are the decisions and why.
   - What it costs: a separate service to run, the same dual-write problem, and the domain rules would live in Numscript instead of tested Kotlin.
 - **Our engine** is small and sits behind one module (`Ledger`) that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (deferred balance check, append-only triggers).
 
-**Balances computed on read.** Every report is a `SUM` over postings.
-- Simple, and always consistent.
-- At scale it would need per-account running balances, maintained in the same transaction, or periodic snapshots.
-- Hot accounts (`psp_clearing`, `fee_revenue`) would then need sharded sub-accounts to avoid row contention.
+**Running balances, updated synchronously.**
+- **Chosen:** the stored balance changes in the same transaction as its postings.
+  - Reads are O(1).
+  - There is no lag.
+  - The balance is exact at the moment a decision is made.
+- **Rejected: recompute on read** (`SUM` over all postings). Fine at small scale, but O(postings) per report.
+- **Rejected: periodic snapshots + tail sum.** Exact and lock-free on write, but every read pays for the tail, and a background job is needed.
+- **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
+
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). At this service's scale, single-digit to low hundreds of TPS with millisecond transactions, that is fine. Beyond that, the known remedies are:
+- splitting a hot account into N sub-accounts (`fee_revenue#0..N`, summed on read);
+- micro-batching many transfers into one transaction, as TigerBeetle does;
+- moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
 
 **Natural-key idempotency instead of an `Idempotency-Key` header.**
 - It fits webhooks, where the event id is the key.
@@ -207,15 +224,20 @@ Where the brief is open, these are the decisions and why.
 
 **Fee policy as config, not per merchant.** One global setting, snapshotted per payment. Per-merchant pricing would move these settings to a merchant contract table, and the snapshot logic would stay the same.
 
-**Concurrency: one row lock, and only for refunds.**
-- **Posting takes no locks.** Writing a journal entry is plain `INSERT`s. Balances are not stored anywhere, so there is no balance row to update or contend on.
-- **Refunds need a lock.** A refund is a read-check-write: read what is still refundable, check the amount, insert. Two concurrent partial refunds could both pass the check and over-refund. The refund therefore takes `SELECT … FOR UPDATE` on its payment row, which serialises refunds *of the same payment* only.
-- **Captures race only on the primary key** (`INSERT … ON CONFLICT DO NOTHING`, then compare fingerprints).
+**Concurrency: database row locks, no explicit locking code.**
+- **Balances.** `UPDATE … SET balance = balance + x` is atomic, and Postgres row-locks the account until commit. Two transactions posting to `fee_revenue` at once therefore queue up: the second waits for the first to commit, re-reads the row and adds its amount. Nothing is lost, and no `SELECT … FOR UPDATE` or retry loop is needed.
+  - To keep the locks short, the balance updates are the last statements of the transaction.
+  - To prevent deadlocks, accounts are always locked in ascending id order.
+- **Refunds.** A refund is a read-check-write: read what is still refundable, check the amount, insert. So it takes `SELECT … FOR UPDATE` on its payment row, which serialises refunds *of the same payment* only.
+- **Captures** race only on the primary key: `INSERT … ON CONFLICT DO NOTHING`, then compare fingerprints.
+- **Tests.** 16 parallel captures on shared accounts lose nothing and do not deadlock; 20 racing partial refunds never over-refund.
 
-Alternatives considered for refunds:
-- **`SERIALIZABLE` isolation** with retry on serialization failure: correct, but needs retry plumbing.
-- **A `refunded_amount` column with `CHECK (refunded_amount <= amount)`:** would let the DB enforce the limit, but it means updating the payment row, which the append-only rule forbids.
-- **TigerBeetle's `debits_must_not_exceed_credits`:** the same idea, built into the engine.
+Alternatives considered:
+- **Optimistic locking** (a version column; retry on conflict). Good when conflicts are rare. On hot accounts that every payment touches, it turns into a retry storm.
+- **Locks in application code** (a mutex or per-account queue). Correct only while there is a single instance. With more instances it needs a distributed lock (e.g. Redis), which adds a new failure mode: a lock that expires while its transaction is still running. The database row lock is already a distributed lock, and it is released on commit, rollback and crash.
+- **For refunds: `SERIALIZABLE` with retries.** Correct, but needs retry plumbing.
+- **For refunds: a `refunded_amount` column with `CHECK (refunded_amount <= amount)`.** The payment would then no longer be append-only.
+- **Future payouts ("not more than the balance")** need no explicit lock either. A conditional update does the check and the write in one atomic step: `UPDATE accounts SET balance = balance - x WHERE id = ? AND balance >= x`, where 0 rows updated means insufficient funds.
 
 **Strictness over convenience.**
 - Unknown JSON fields are rejected.
@@ -284,6 +306,6 @@ src/main/kotlin/io/github/refined/morledger/
   reports/BalanceReport.kt     ledger balances -> report
   api/                         routes, DTOs, error mapping
 src/main/resources/
-  db/migration/                Flyway: V1 baseline, V2 ledger + business tables
+  db/migration/                Flyway: V1__schema.sql (ledger + business tables, constraints, triggers)
   web/                         demo console, Swagger page, openapi.yaml
 ```

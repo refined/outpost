@@ -178,6 +178,7 @@ class PaymentApiTest {
         val again = client.refund("p_1", "r_5")
         assertEquals("payment_fully_refunded", again.json().str("error"))
         assertTrue(client.balances().isBalanced())
+        TestDatabase.assertLedgerConsistent()
     }
 
     @Test

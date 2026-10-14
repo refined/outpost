@@ -12,7 +12,7 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a balances report: tax owed to authorities, merchant balances.
 - **Spec:** [docs/requirements.md](docs/requirements.md).
 - **Target date:** 2026-10-19.
-- **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency) and extras (`asOf` reports, journal endpoint, demo console `/ui`, Swagger `/docs`). 40 tests; CI runs on Linux, macOS and Windows. What remains is polish and interview prep.
+- **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency) and extras (`asOf` reports, journal endpoint, demo console `/ui`, Swagger `/docs`). 43 tests; CI runs on Linux, macOS and Windows. What remains is polish and interview prep.
 - **Platforms:** must build, test and run on macOS, Linux and Windows.
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -45,7 +45,7 @@ src/main/kotlin/io/github/refined/morledger/
   api/                        Routes, Dto (wire format), Errors (DomainException -> HTTP status)
   db/Database.kt              Hikari + Flyway, DataSource.transaction { }
 src/main/resources/
-  db/migration/               V1 baseline, V2 ledger + payments/refunds (constraints, triggers)
+  db/migration/               V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
   web/                        ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
   logback.xml
 docs/demo.http              demo scenario as HTTP requests
@@ -63,7 +63,7 @@ docs/domain/            MoR background: VAT, money flows, ledger posting example
 docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + app (127.0.0.1:8090)
 docker compose --profile test run --rm test      # test suite in the build stage, against postgres-test (tmpfs)
 docker compose logs -f app
-docker compose down                              # -v also drops the pgdata volume
+docker compose --profile test down               # stop everything incl. postgres-test; -v also drops pgdata
 ```
 
 Host-JDK workflow (optional, for fast edit-run loops):
@@ -139,7 +139,8 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 
 - **Capture** (gross G = tax T + fee F + merchant M): Dr clearing G / Cr tax T, Cr fee F, Cr merchant M.
 - **Refund r:** the mirror image for the refunded parts (`ChartOfAccounts.refund`).
-- **Report:** a pure read: tax owed and merchant balances are the credit balances of their accounts.
+- **Balances:** each account stores a running `balance`, moved in the same transaction as its postings. The current report reads it; `asOf` reports sum the postings.
+- **Report:** tax owed and merchant balances are the credit balances of their accounts.
 
 ## Decisions (resolved 2026-10-14)
 
@@ -159,13 +160,14 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 12 | Concurrency | Refund = `SELECT … FOR UPDATE` on the payment; capture = `INSERT … ON CONFLICT DO NOTHING` + fingerprint compare |
 | 13 | Time | `effective_at` (event time, `asOf` filters on it) and `recorded_at`; future event times → 400 (5 min skew) |
 | 14 | JSON | Strict: unknown fields → 400; amounts are integers; rates are decimal strings |
-| 15 | Ledger engine | Own, on Postgres; DB enforces balance (deferred constraint trigger) and append-only (triggers); TRUNCATE allowed for tests |
+| 15 | Ledger engine | Own, on Postgres; DB enforces balance (deferred constraint trigger) and append-only history (triggers); on accounts only `balance` may change; TRUNCATE allowed for tests |
 | 16 | Demo | `/ui` vanilla JS console + `/docs` Swagger (swagger-ui-dist from jsDelivr, pinned 5.33.0); no extra Gradle dependency |
 | 17 | Runtime | Everything in Docker: app image + Postgres via compose; tests via the compose `test` profile; CI has a `docker` job (build, smoke test, tests in Docker) |
+| 18 | Balances | Stored running `balance` per account, updated in the same tx via atomic `UPDATE … balance = balance + x`, accounts locked in id order as the last statements; the current report reads it; `asOf` sums postings; `Ledger.verify` reconciles (used in tests). Rejected: SUM on read, snapshots, queue-fed balances, optimistic locking, app-level locks (see README Trade-offs) |
+| 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 
 ## Ideas not done (candidates if time allows)
 
-- Running balances per account (materialised in the same tx) instead of SUM on read.
 - Bitemporal `asOf` + `knownAt` reporting; closed periods.
 - Payout / settlement / tax remittance entries (designs are in the README's out-of-scope table).
 - Per-merchant pricing (a contract table) instead of global config.

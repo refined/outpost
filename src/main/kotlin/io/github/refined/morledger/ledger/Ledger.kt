@@ -1,7 +1,6 @@
 package io.github.refined.morledger.ledger
 
 import java.sql.Connection
-import java.sql.Types
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
@@ -39,21 +38,31 @@ data class AccountBalance(val account: Account, val signedSum: Long) {
     val balance: Long get() = if (account.normalSide == NormalSide.DEBIT) signedSum else -signedSum
 }
 
+/** An account whose stored running balance differs from the sum of its postings. */
+data class BalanceMismatch(val account: Account, val stored: Long, val fromPostings: Long)
+
 /**
  * The double-entry ledger engine: the only code that touches the `ledger.*` tables.
  * It knows nothing about payments or merchants, so it could be replaced by TigerBeetle or Formance behind the same API.
  *
  * Every method takes the caller's [Connection], so the business record and its journal entry commit together.
+ *
+ * Balances: each account keeps a running `balance`, updated in the same transaction as the postings with an
+ * atomic `UPDATE … SET balance = balance + x`. Postgres row-locks the account until commit, so concurrent posts to
+ * the same account queue up instead of losing updates. Accounts are always locked in id order (no deadlocks), and
+ * as the last step of the transaction (short lock hold). Historical (`asOf`) balances are summed from postings.
  */
 object Ledger {
-    /** Posts a balanced, single-currency entry; zero-amount lines are dropped. Returns the entry id. */
+    /** Posts a balanced, single-currency entry and moves the account balances; zero lines are dropped. Returns the entry id. */
     fun post(conn: Connection, entry: NewJournalEntry): Long {
         val lines = entry.postings.filter { it.amount != 0L }
         require(lines.size >= 2) { "a journal entry needs at least two non-zero postings" }
         require(lines.map { it.account.currency }.distinct().size == 1) { "a journal entry must use one currency" }
         require(lines.sumOf { it.amount } == 0L) { "unbalanced journal entry: postings sum to ${lines.sumOf { it.amount }}" }
 
-        val accountIds = lines.map { it.account }.distinct().associateWith { accountId(conn, it) }
+        // Creation order is fixed too: two transactions creating the same new accounts must not deadlock.
+        val accountIds = lines.map { it.account }.distinct().sortedBy { it.code + "|" + it.currency }
+            .associateWith { accountId(conn, it) }
         val entryId = conn.prepareStatement(
             """
             INSERT INTO ledger.journal_entries (kind, payment_id, refund_id, effective_at)
@@ -78,28 +87,84 @@ object Ledger {
             }
             st.executeBatch()
         }
+
+        val deltas = lines.groupBy { accountIds.getValue(it.account) }.mapValues { (_, l) -> l.sumOf { it.amount } }
+        conn.prepareStatement("UPDATE ledger.accounts SET balance = balance + ? WHERE id = ?").use { st ->
+            for ((accountId, delta) in deltas.toSortedMap()) {
+                st.setLong(1, delta)
+                st.setLong(2, accountId)
+                st.addBatch()
+            }
+            st.executeBatch()
+        }
         return entryId
     }
 
-    /** Balances of every account, from entries effective at or before [asOf] (all entries when null). */
+    /**
+     * Current balances (the stored running balances) or, with [asOf], balances summed from the postings of entries
+     * effective at or before that instant.
+     */
     fun balances(conn: Connection, asOf: Instant? = null, currency: String? = null): List<AccountBalance> =
+        if (asOf == null) currentBalances(conn, currency) else historicalBalances(conn, asOf, currency)
+
+    /** Reconciliation: accounts whose stored balance is not the sum of their postings. Empty when the ledger is sound. */
+    fun verify(conn: Connection): List<BalanceMismatch> =
+        conn.prepareStatement(
+            """
+            SELECT a.code, a.currency, a.normal_side, a.balance, COALESCE(SUM(p.amount), 0)
+            FROM ledger.accounts a
+            LEFT JOIN ledger.postings p ON p.account_id = a.id
+            GROUP BY a.id
+            HAVING a.balance <> COALESCE(SUM(p.amount), 0)
+            ORDER BY a.currency, a.code
+            """.trimIndent(),
+        ).use { st ->
+            st.executeQuery().use { rs ->
+                buildList {
+                    while (rs.next()) {
+                        val account = Account(rs.getString(1), rs.getString(2), NormalSide.valueOf(rs.getString(3)))
+                        add(BalanceMismatch(account, rs.getLong(4), rs.getLong(5)))
+                    }
+                }
+            }
+        }
+
+    private fun currentBalances(conn: Connection, currency: String?): List<AccountBalance> =
+        conn.prepareStatement(
+            """
+            SELECT code, currency, normal_side, balance FROM ledger.accounts
+            WHERE CAST(? AS TEXT) IS NULL OR currency = CAST(? AS TEXT)
+            ORDER BY currency, code
+            """.trimIndent(),
+        ).use { st ->
+            st.setString(1, currency)
+            st.setString(2, currency)
+            st.executeQuery().use { rs ->
+                buildList {
+                    while (rs.next()) {
+                        val account = Account(rs.getString(1), rs.getString(2), NormalSide.valueOf(rs.getString(3)))
+                        add(AccountBalance(account, rs.getLong(4)))
+                    }
+                }
+            }
+        }
+
+    private fun historicalBalances(conn: Connection, asOf: Instant, currency: String?): List<AccountBalance> =
         conn.prepareStatement(
             """
             SELECT a.code, a.currency, a.normal_side, SUM(p.amount)
             FROM ledger.postings p
             JOIN ledger.journal_entries e ON e.id = p.entry_id
             JOIN ledger.accounts a ON a.id = p.account_id
-            WHERE (CAST(? AS TIMESTAMPTZ) IS NULL OR e.effective_at <= CAST(? AS TIMESTAMPTZ))
+            WHERE e.effective_at <= ?
               AND (CAST(? AS TEXT) IS NULL OR a.currency = CAST(? AS TEXT))
             GROUP BY a.code, a.currency, a.normal_side
             ORDER BY a.currency, a.code
             """.trimIndent(),
         ).use { st ->
-            val at = asOf?.atOffset(ZoneOffset.UTC)
-            st.setObject(1, at, Types.TIMESTAMP_WITH_TIMEZONE)
-            st.setObject(2, at, Types.TIMESTAMP_WITH_TIMEZONE)
+            st.setObject(1, asOf.atOffset(ZoneOffset.UTC))
+            st.setString(2, currency)
             st.setString(3, currency)
-            st.setString(4, currency)
             st.executeQuery().use { rs ->
                 buildList {
                     while (rs.next()) {

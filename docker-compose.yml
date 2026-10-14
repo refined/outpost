@@ -2,7 +2,7 @@
 #
 #   docker compose up -d --build --wait            # Postgres + service -> http://localhost:8090/ui/
 #   docker compose --profile test run --rm test    # full test suite in a JDK container, against its own Postgres
-#   docker compose down                            # stop (add -v to drop the data volume)
+#   docker compose --profile test down             # stop everything, incl. the test database (-v also drops data)
 
 services:
   postgres:
