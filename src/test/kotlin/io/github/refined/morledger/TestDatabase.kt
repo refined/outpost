@@ -2,6 +2,7 @@ package io.github.refined.morledger
 
 import com.zaxxer.hikari.HikariDataSource
 import io.github.refined.morledger.db.Database
+import io.github.refined.morledger.db.transaction
 import org.testcontainers.postgresql.PostgreSQLContainer
 
 /**
@@ -23,5 +24,16 @@ object TestDatabase {
         }
         Database.migrate(ds)
         ds
+    }
+
+    /** Empties all business and ledger tables. TRUNCATE is deliberately not blocked by the append-only triggers. */
+    fun reset() {
+        dataSource.transaction { conn ->
+            conn.createStatement().use {
+                it.execute(
+                    "TRUNCATE refunds, payments, ledger.postings, ledger.journal_entries, ledger.accounts RESTART IDENTITY",
+                )
+            }
+        }
     }
 }
