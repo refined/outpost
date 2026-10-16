@@ -103,7 +103,7 @@ class LedgerTest {
     fun `database rejects an unbalanced entry written around the code`() {
         val error = assertFailsWith<SQLException> {
             dataSource.transaction { conn ->
-                val entryId = ledger.post(conn, capture("p_1", Split(0, 0, 100)))!!
+                val entryId = ledger.post(conn, capture("p_1", Split(0, 0, 100)))
                 conn.createStatement().use {
                     it.executeUpdate(
                         "INSERT INTO ledger.postings (entry_id, account_id, amount) SELECT $entryId, id, 1 FROM ledger.accounts LIMIT 1",

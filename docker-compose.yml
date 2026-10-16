@@ -25,6 +25,7 @@ services:
 
   app:
     build: .
+    security_opt: ["seccomp=unconfined"] # the TigerBeetle client (LEDGER_ENGINE=TIGERBEETLE) uses io_uring too
     environment:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-mor_ledger}
       DB_USER: ${POSTGRES_USER:-mor}
@@ -33,11 +34,29 @@ services:
       REFUND_FEE_POLICY: ${REFUND_FEE_POLICY:-MOR_KEEPS_FEE}
       BALANCE_MODE: ${BALANCE_MODE:-STORED}
       HOT_ACCOUNT_SHARDS: ${HOT_ACCOUNT_SHARDS:-1}
+      LEDGER_ENGINE: ${LEDGER_ENGINE:-POSTGRES}
+      TB_ADDRESS: tigerbeetle:3000
     ports:
       - "127.0.0.1:${APP_HOST_PORT:-8090}:8090"
     depends_on:
       postgres:
         condition: service_healthy
+      tigerbeetle:
+        condition: service_started
+        required: false # only with the "tb" profile
+
+  # ── TigerBeetle (profile "tb"): the alternative ledger engine, LEDGER_ENGINE=TIGERBEETLE. ──────────────────────
+  tigerbeetle:
+    profiles: [tb]
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9
+    security_opt: ["seccomp=unconfined"] # TigerBeetle needs io_uring, which Docker 25+ blocks by default
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        [ -f /data/0_0.tigerbeetle ] || /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle;
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 --cache-grid=256MiB /data/0_0.tigerbeetle
+    volumes:
+      - tbdata:/data
 
   # ── Tests (profile "test"): the build stage of the Dockerfile runs Gradle against a throwaway database. ──────
   postgres-test:
@@ -60,16 +79,32 @@ services:
     build:
       context: .
       target: build
+    security_opt: ["seccomp=unconfined"] # for the TigerBeetle client in TigerBeetleLedgerTest
     command: ["gradle", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
     environment:
       TEST_DB_URL: jdbc:postgresql://postgres-test:5432/mor_ledger_test
       TEST_DB_USER: mor
       TEST_DB_PASSWORD: mor
+      TB_ADDRESS: tigerbeetle-test:3000
     volumes:
       - gradle-cache:/home/gradle/.gradle
     depends_on:
       postgres-test:
         condition: service_healthy
+      tigerbeetle-test:
+        condition: service_started
+
+  tigerbeetle-test:
+    profiles: [test]
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9
+    security_opt: ["seccomp=unconfined"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle &&
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 --development /data/0_0.tigerbeetle
+    tmpfs:
+      - /data
 
   # ── Tools (profile "tools"): k6 for the demo dataset and the benchmarks (scripts in perf/k6). ──────────────────
   k6:
@@ -87,4 +122,5 @@ services:
 
 volumes:
   pgdata:
+  tbdata:
   gradle-cache:

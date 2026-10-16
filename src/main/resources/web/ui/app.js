@@ -380,7 +380,7 @@ async function merchantPage(id) {
   const [ts, payments, journal] = await Promise.all([
     api(`/v1/analytics/timeseries?currency=${cur}&merchantId=${encodeURIComponent(id)}&bucket=${bucket}${from}`),
     api(`/v1/payments?${qs}`),
-    api(`/v1/journal?merchantId=${encodeURIComponent(id)}&limit=8`),
+    api(`/v1/journal?merchantId=${encodeURIComponent(id)}&limit=8`).catch((e) => ({ entries: [], note: e.message })),
   ]);
   const jurisdictions = detail.jurisdictions.filter((j) => j.currency === cur);
 
@@ -425,7 +425,7 @@ async function merchantPage(id) {
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-head"><h2>Latest journal entries</h2><span class="hint">entries touching merchant_payable:${esc(id)}</span><span class="spacer"></span><a href="#/ledger">Ledger →</a></div>
-      ${journalTable(journal.entries)}
+      ${journal.note ? `<p class="hint">${esc(journal.note)}</p>` : journalTable(journal.entries)}
     </div>`;
 
   document.getElementById("range").append(rangeButtons(render));
@@ -476,7 +476,7 @@ async function ledgerPage() {
     api("/health"),
     api("/v1/ledger/verify").catch((e) => ({ error: e.message })),
     api(`/v1/ledger/accounts${lv.currency ? `?currency=${lv.currency}` : ""}`),
-    api(`/v1/journal?${jq}`),
+    api(`/v1/journal?${jq}`).catch((e) => ({ entries: [], note: e.message })),
   ]);
   const verifyBadge = verify.error ? `<span class="badge bad">${esc(verify.error)}</span>`
     : verify.ok ? `<span class="badge good">stored balances = Σ postings</span>` : `<span class="badge bad">${verify.mismatches.length} mismatches</span>`;
@@ -495,7 +495,7 @@ async function ledgerPage() {
         <tbody>${accounts.accounts.map((a) => `<tr title="normal side: ${a.normalSide.toLowerCase()}"><td class="mono">${esc(a.code)}</td><td>${a.currency}</td>${moneyCell(a.balance, a.currency)}</tr>`).join("")}</tbody></table></div></div>
       <div class="card"><div class="card-head"><h2>Journal</h2><span class="hint">most recent first</span><span class="spacer"></span>
         <input id="l-pay" placeholder="Filter by payment id" value="${esc(lv.paymentId)}"></div>
-        ${journalTable(journal.entries)}
+        ${journal.note ? `<p class="hint">${esc(journal.note)}</p>` : journalTable(journal.entries)}
         <div class="pager"><button class="ghost small" id="l-newer" ${lv.before.length ? "" : "disabled"}>← Newer</button>
           <button class="ghost small" id="l-older" ${journal.entries.length < 25 ? "disabled" : ""}>Older →</button></div></div>
     </div>`;

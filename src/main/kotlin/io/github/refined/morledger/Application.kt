@@ -6,6 +6,7 @@ import io.github.refined.morledger.db.Database
 import io.github.refined.morledger.ledger.BalanceMode
 import io.github.refined.morledger.ledger.LedgerEngine
 import io.github.refined.morledger.ledger.PostgresLedger
+import io.github.refined.morledger.ledger.TigerBeetleLedger
 import io.github.refined.morledger.money.RefundFeePolicy
 import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.PricingSettings
@@ -44,6 +45,8 @@ data class AppConfig(
                 refundFeePolicy = RefundFeePolicy.valueOf(env["REFUND_FEE_POLICY"] ?: RefundFeePolicy.MOR_KEEPS_FEE.name),
             ),
             ledger = LedgerSettings(
+                engine = LedgerEngineKind.valueOf(env["LEDGER_ENGINE"] ?: LedgerEngineKind.POSTGRES.name),
+                tigerBeetleAddress = env["TB_ADDRESS"] ?: "tigerbeetle:3000",
                 balanceMode = BalanceMode.valueOf(env["BALANCE_MODE"] ?: BalanceMode.STORED.name),
                 hotAccountShards = (env["HOT_ACCOUNT_SHARDS"] ?: "1").toInt().also {
                     require(it in 1..64) { "HOT_ACCOUNT_SHARDS must be in [1, 64]" }
@@ -53,12 +56,19 @@ data class AppConfig(
     }
 }
 
+enum class LedgerEngineKind { POSTGRES, TIGERBEETLE }
+
 /** Ledger engine options; the non-default ones exist to compare approaches (docs/performance.md). */
 data class LedgerSettings(
+    val engine: LedgerEngineKind = LedgerEngineKind.POSTGRES,
     val balanceMode: BalanceMode = BalanceMode.STORED,
     val hotAccountShards: Int = 1,
+    val tigerBeetleAddress: String = "tigerbeetle:3000",
 ) {
-    fun engine(): LedgerEngine = PostgresLedger(balanceMode)
+    fun engine(): LedgerEngine = when (engine) {
+        LedgerEngineKind.POSTGRES -> PostgresLedger(balanceMode)
+        LedgerEngineKind.TIGERBEETLE -> TigerBeetleLedger.connect(tigerBeetleAddress)
+    }
 }
 
 fun main() {

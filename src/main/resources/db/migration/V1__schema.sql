@@ -116,6 +116,16 @@ CREATE TRIGGER journal_entries_append_only BEFORE UPDATE OR DELETE ON ledger.jou
 CREATE TRIGGER postings_append_only BEFORE UPDATE OR DELETE ON ledger.postings
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();
 
+-- Accounts of the TigerBeetle engine (LEDGER_ENGINE=TIGERBEETLE). TigerBeetle keeps balances under 128-bit ids;
+-- this maps them back to account codes so that reports can list them. Unused with the Postgres engine.
+CREATE TABLE ledger.tb_accounts (
+    id          NUMERIC(39) PRIMARY KEY,          -- the TigerBeetle account id (u128)
+    code        TEXT    NOT NULL,
+    currency    CHAR(3) NOT NULL,
+    normal_side TEXT    NOT NULL CHECK (normal_side IN ('DEBIT', 'CREDIT')),
+    UNIQUE (code, currency)
+);
+
 -- ─── Business records ───────────────────────────────────────────────────────────────────────────────────
 
 -- A captured payment with the split and the terms (rates, refund policy) snapshotted at capture time.
