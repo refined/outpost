@@ -5,6 +5,7 @@ import java.sql.ResultSet
 import java.time.Instant
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
+import java.util.concurrent.ConcurrentHashMap
 
 /** How current balances are kept. Switchable to compare the approaches (see docs/performance.md). */
 enum class BalanceMode {
@@ -184,7 +185,15 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(AccountBalance(rs.toAccount(), rs.getLong(4))) } }
         }
 
+    /**
+     * Account ids never change, so they are cached. Only ids of rows that were already there are cached: a row this
+     * transaction just inserted might still roll back.
+     */
+    private val accountIds = ConcurrentHashMap<Account, Long>()
+
     private fun accountId(conn: Connection, account: Account): Long {
+        accountIds[account]?.let { return it }
+        findAccount(conn, account)?.let { id -> accountIds[account] = id; return id }
         conn.prepareStatement(
             "INSERT INTO ledger.accounts (code, currency, normal_side) VALUES (?, ?, ?) ON CONFLICT (code, currency) DO NOTHING",
         ).use { st ->
@@ -193,16 +202,19 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
             st.setString(3, account.normalSide.name)
             st.executeUpdate()
         }
-        return conn.prepareStatement("SELECT id, normal_side FROM ledger.accounts WHERE code = ? AND currency = ?").use { st ->
+        return findAccount(conn, account)!!
+    }
+
+    private fun findAccount(conn: Connection, account: Account): Long? =
+        conn.prepareStatement("SELECT id, normal_side FROM ledger.accounts WHERE code = ? AND currency = ?").use { st ->
             st.setString(1, account.code)
             st.setString(2, account.currency)
             st.executeQuery().use { rs ->
-                rs.next()
+                if (!rs.next()) return null
                 check(rs.getString(2) == account.normalSide.name) { "account ${account.code} exists with another normal side" }
                 rs.getLong(1)
             }
         }
-    }
 
     private fun ResultSet.toAccount() = Account(getString(1), getString(2), NormalSide.valueOf(getString(3)))
 }

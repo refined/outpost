@@ -1,0 +1,28 @@
+# Resource limits for the benchmark: the whole system under test shares 2 CPUs and 3 GB.
+# Used as an override:  docker compose -f docker-compose.yml -f perf/compose.limits.yml ...
+# perf/run-benchmarks.sh sets the split per variant; k6 (the load generator) is deliberately not limited.
+
+services:
+  app:
+    environment:
+      JAVA_OPTS: -XX:MaxRAMPercentage=70 -XX:+UseG1GC
+    deploy:
+      resources:
+        limits:
+          cpus: "${APP_CPUS:-1.0}"
+          memory: ${APP_MEM:-1280M}
+
+  postgres:
+    command: ["postgres", "-c", "shared_buffers=${PG_SHARED_BUFFERS:-256MB}", "-c", "max_connections=50"]
+    deploy:
+      resources:
+        limits:
+          cpus: "${PG_CPUS:-1.0}"
+          memory: ${PG_MEM:-1792M}
+
+  tigerbeetle:
+    deploy:
+      resources:
+        limits:
+          cpus: "${TB_CPUS:-0.8}"
+          memory: ${TB_MEM:-2432M}

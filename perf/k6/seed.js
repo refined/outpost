@@ -41,3 +41,22 @@ export default function () {
     check(refunded, { 'refund 201/200': (r) => r.status === 201 || r.status === 200 });
   }
 }
+
+// A one-line result (and a JSON row for perf/run-benchmarks.sh when OUT is set): bulk ingest throughput.
+export function handleSummary(data) {
+  const m = data.metrics;
+  const seconds = data.state.testRunDurationMs / 1000;
+  const row = {
+    variant: __ENV.VARIANT || 'local',
+    scenario: 'seed',
+    payments: m.iterations ? m.iterations.values.count : 0,
+    requests: m.http_reqs ? m.http_reqs.values.count : 0,
+    seconds: Math.round(seconds),
+    paymentsPerSecond: Math.round((m.iterations ? m.iterations.values.count : 0) / seconds),
+    p95: Math.round(m.http_req_duration.values['p(95)']),
+    errorRate: m.checks ? Math.round((1 - m.checks.values.rate) * 10000) / 10000 : 0,
+  };
+  const out = { stdout: `seed: ${row.payments} payments (${row.requests} requests) in ${row.seconds}s = ${row.paymentsPerSecond} payments/s, p95=${row.p95}ms, errors=${(row.errorRate * 100).toFixed(2)}%\n` };
+  if (__ENV.OUT) out[`/results/${__ENV.OUT}.json`] = JSON.stringify(row) + '\n';
+  return out;
+}
