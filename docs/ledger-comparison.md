@@ -31,7 +31,7 @@ The brief allows an off-the-shelf ledger (Formance, TigerBeetle) or our own. Thi
 
 ## What we learned by actually integrating TigerBeetle
 
-`TigerBeetleLedger` is a second implementation of the same `LedgerEngine` interface, selectable with `LEDGER_ENGINE=TIGERBEETLE`. The same money-flow test produces identical balances on both engines, and the full demo dataset reconciles merchant by merchant. Things that only showed up while doing it:
+We built `TigerBeetleLedger` as a second implementation of the ledger interface, selectable with `LEDGER_ENGINE=TIGERBEETLE`, ran the same money-flow tests and the benchmark on it, and then removed it (the code is in commit `0ffcf3f`). Balances matched the Postgres ledger exactly, and the full demo dataset reconciled merchant by merchant. Things that only showed up while doing it:
 
 - **Dual write is real.** Payments and refunds still live in Postgres. Transfers are sent to TigerBeetle *inside* the Postgres transaction, just before commit. If the commit then fails, TigerBeetle has transfers that Postgres does not; the retried webhook repairs it (deterministic ids → `exists`), but an event that is never retried leaves an orphan. We need a reconciliation job either way, and the merchant "ledger check" in the console is exactly that.
 - **Linked transfers and retries.** Re-sending a linked chain answers `exists` for the first transfer and `linked_event_failed` for the rest (the chain is atomic). Idempotency handling has to recognise that combination; treating `linked_event_failed` as an error would turn every retry into a 500.
@@ -42,11 +42,31 @@ The brief allows an off-the-shelf ledger (Formance, TigerBeetle) or our own. Thi
 
 ## Measured under the same budget
 
-> Filled in from the benchmark run — see [performance.md](performance.md) for the method and all numbers.
+2 CPUs and 3 GB for the whole system under test. Full method and numbers: [performance.md](performance.md).
+
+| Variant | Highest holding rate: capture / hot merchant / mixed | Balance report @ 100k payments (p95) | Read staleness |
+|---|---|---|---|
+| Postgres, stored balances | 400 / 400 / 498 rps | 2 ms | none |
+| Postgres, batched snapshot (1 s) | 350 / 350 / 350 rps | 3 ms | ≤ 1 s |
+| Postgres, snapshot + tail | 399 / 349 / 200 rps | 10 ms | none |
+| Postgres, summed on read | 350 / 350 / — | 9.6 s | none |
+| Postgres, stored, 8 sub-accounts | 350 / 350 / 300 rps | 3 ms | none |
+| TigerBeetle (+ Postgres for business rows) | none held at 200 rps | 22 ms | none |
+
+All Postgres variants hit the same CPU ceiling; balance locking was never the bottleneck. TigerBeetle's ~2.3 GB of static memory starved the app and Postgres under this budget, and the dual write added a network round trip to every request.
 
 ## Decision
 
-> Filled in after the benchmark run.
+**Our own ledger on Postgres, with stored balances.** It is the only option where the payment, its idempotency record and its journal entry commit in one transaction. It was also the fastest variant we measured, and it adds nothing to operate.
+
+- **Next step if hot accounts or reads ever become the bottleneck:** `BALANCE_MODE=BATCHED`, kept in the code. Writes take no account locks, and reads come from a snapshot that is at most one refresh old (`/v1/ledger/lag` shows how old). Decisions that need an exact balance read the snapshot plus the tail.
+- **Removed after measuring:**
+  - summed-on-read balances: reads grow with history;
+  - snapshot + tail: the read cost was paid on every report;
+  - hot-account sub-accounts: no gain without lock contention;
+  - the TigerBeetle engine.
+- **When to revisit TigerBeetle:** sustained thousands of transfers per second concentrated on a few accounts (a single merchant or a single clearing account), with a budget for a dedicated, replicated TigerBeetle cluster and an outbox/reconciliation job for the dual write. That is far beyond this service's few TPS average and low hundreds at peak.
+- **Formance / SaaS:** worth a look when ledger features (Numscript flows, multi-tenant books, a hosted audit trail) matter more than single-transaction atomicity with our own records.
 
 ## Sources
 
