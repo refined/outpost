@@ -39,40 +39,31 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
 
-**Code layout.** The ledger engine ([`ledger/Ledger.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+**Code layout.** The ledger ([`ledger/Ledger.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
 
-## Ledger engines
+## Balance modes
 
-The ledger sits behind one interface, [`LedgerEngine`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt), so the approaches can be compared on the same code and data. None of the knobs changes a single number: a test runs the same money flow through every variant and compares the reports.
-
-| Setting | Values | What changes |
-|---|---|---|
-| `LEDGER_ENGINE` | `POSTGRES` (default), `TIGERBEETLE` | Where postings and balances live |
-| `BALANCE_MODE` (Postgres) | `STORED` (default), `COMPUTED`, `SNAPSHOT`, `BATCHED` | See below |
-| `BALANCE_REFRESH_MS` | `1000` (default) | `SNAPSHOT` / `BATCHED`: how often the snapshot is refreshed |
-| `HOT_ACCOUNT_SHARDS` | `1` (default) … `64` | Splits `psp_clearing`, `fee_revenue` and `tax_payable:*` into sub-accounts to spread row locks; reports fold them back |
-
-What the balance modes do, for one capture of 4 postings:
+`BALANCE_MODE` decides how current balances are kept. It never changes a number: a test runs the same money flow through both modes and compares the reports. `asOf` reports always sum the postings.
 
 | Mode | On posting | On a current-balance read | Fresh? |
 |---|---|---|---|
-| `STORED` | `UPDATE accounts SET balance = balance + x` on each account: a row lock held until commit | Read the column | Exact |
-| `COMPUTED` | Nothing beyond the postings | `SUM(postings)` per account: grows with history | Exact |
-| `SNAPSHOT` | Nothing beyond the postings | Snapshot + `SUM` of the postings not yet folded in (the tail) | Exact |
-| `BATCHED` | Nothing beyond the postings | Snapshot only | Stale by up to one refresh |
+| `STORED` (default) | `UPDATE accounts SET balance = balance + x` on each account: a row lock held until commit | Read the column | Exact |
+| `BATCHED` | Nothing beyond the postings | Read the snapshot | Stale by up to one refresh (`BALANCE_REFRESH_MS`, 1 s) |
+
+Four more variants were measured and removed: balances summed on read, snapshot + tail, hot accounts split into sub-accounts, and TigerBeetle. Why, with the numbers: [performance.md](performance.md).
 
 **The snapshot refresh.** A background task (every `BALANCE_REFRESH_MS`) adds the postings written since the last refresh to `ledger.balance_snapshots`, in one statement.
 - **The boundary is a transaction id, not an entry id.** Entry ids are handed out before commit, so a lower id can commit after a higher one, and a refresh by id would skip it for good.
 - Each journal entry records its writer's `pg_current_xact_id()`. A refresh folds entries with txid below `pg_snapshot_xmin(pg_current_snapshot())`: every transaction below it has finished, so nothing can still commit behind the boundary.
-- A test holds an entry uncommitted across a refresh and checks that the next refresh picks it up; another refreshes in a loop under parallel captures and compares with `SUM`.
-- `/v1/ledger/lag` reports the entries waiting for the next refresh and, for `BATCHED`, how old the oldest one is: that is how stale a read can be.
+- A test holds an entry uncommitted across a refresh and checks that the next refresh picks it up; another refreshes in a loop under parallel captures and compares with `STORED`.
+- `/v1/ledger/lag` reports the entries waiting for the next refresh and how old the oldest one is: that is how stale a read can be.
 - `verify` checks the snapshot against the postings below the boundary.
 
-The TigerBeetle mapping, and what integrating it taught us (dual write, linked-transfer retries, static memory, io_uring), is in [ledger-comparison.md](ledger-comparison.md). The measured differences are in [performance.md](performance.md).
+What integrating TigerBeetle taught us (dual write, linked-transfer retries, static memory, io_uring) is in [ledger-comparison.md](ledger-comparison.md).
 
 ## Analytics and the console
 
-The console's per-merchant breakdown, time series and money-flow diagram come from `/v1/analytics/*`. These aggregate the business records (`payments`, `refunds`), which carry the full split of every event, so they work with any ledger engine.
+The console's per-merchant breakdown, time series and money-flow diagram come from `/v1/analytics/*`. These aggregate the business records (`payments`, `refunds`), which carry the full split of every event.
 - **Cross-check.** Each merchant row carries a `reconciled` flag: the balance computed from the records must equal the merchant's balance in the ledger.
 - **Ledger page.** `/v1/ledger/accounts` lists every account, and `/v1/ledger/verify` checks that each stored balance equals the sum of its postings.
 
@@ -111,6 +102,7 @@ Where the brief is open, these are the decisions and why.
 - **TigerBeetle**
   - What it offers: very high throughput, strict double-entry semantics, linked transfers, and balance limits (it could enforce "refunds ≤ capture" on its own).
   - What it costs: payment metadata still needs a database, so every capture becomes a dual write between that database and TigerBeetle. That needs an outbox or a reconciliation job. One more stateful process to run. Our load is far below where it pays off.
+  - Measured: we integrated it and benchmarked it under the same 2 CPU / 3 GB budget. Its ~2.3 GB of static memory starved the app and Postgres, and it held no step, not even 200 rps ([performance.md](performance.md)). It was then removed.
 - **Formance Ledger**
   - What it offers: a ready ledger API, Numscript for splits (including rounding allotments), and built-in audit history.
   - What it costs: a separate service to run, the same dual-write problem, and the domain rules would live in Numscript instead of tested Kotlin.
@@ -121,13 +113,14 @@ Where the brief is open, these are the decisions and why.
   - Reads are O(1).
   - There is no lag.
   - The balance is exact at the moment a decision is made.
-- **Rejected: recompute on read** (`SUM` over all postings). Fine at small scale, but O(postings) per report.
-- **Rejected: periodic snapshots + tail sum.** Exact and lock-free on write, but every read pays for the tail, and a background job is needed.
+- **Rejected: recompute on read** (`SUM` over all postings). Fine at small scale, but O(postings) per report: 5–10 s at 100k payments.
+- **Rejected: periodic snapshots + tail sum.** Exact and lock-free on write, but every read pays for the tail; under a mixed load it halved the holding rate.
+- **Kept as an option: snapshot only (`BATCHED`).** Lock-free on write, constant-cost reads, stale by up to one refresh. Good for reports, not for decisions that need the balance at that moment.
 - **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
 
-The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). At this service's scale, single-digit to low hundreds of TPS with millisecond transactions, that is fine. Beyond that, the known remedies are:
-- splitting a hot account into N sub-accounts (`fee_revenue#0..N`, summed on read);
-- micro-batching many transfers into one transaction, as TigerBeetle does;
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is not the limit: the service tops out at ~400 captures/s on CPU, even with every payment on one merchant, and taking the lock away or splitting the accounts gained nothing. If it ever becomes the limit, the known remedies are:
+- `BALANCE_MODE=BATCHED` (in the code): no account locks on write;
+- splitting a hot account into N sub-accounts (measured, then removed);
 - moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
 
 **Natural-key idempotency instead of an `Idempotency-Key` header.**
@@ -185,15 +178,15 @@ Two Gradle test suites ([JVM Test Suite plugin](https://docs.gradle.org/current/
 
 | Suite | Folder | What | Rule |
 |---|---|---|---|
-| `test` | `src/test/kotlin` | Unit tests of pure functions: money math (with a seeded property test over 10,000 random refund sequences), journal-entry validation, TigerBeetle transfer pairing, report folding, config parsing | No database, no app, no setup beyond constructing values |
+| `test` | `src/test/kotlin` | Unit tests of pure functions: money math (with a seeded property test over 10,000 random refund sequences), journal-entry validation, report grouping, config parsing | No database, no app, no setup beyond constructing values |
 | `integrationTest` | `src/integrationTest/kotlin` | The service through its HTTP API (Ktor `testApplication`) against a real Postgres | Everything with state is tested here, through the API |
 
 The integration suite covers:
 - **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, analytics, validation.
 - **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
-- **Ledger modes**: the same flow through the API on every `BALANCE_MODE` and shard count gives identical reports; batched reads lag until a refresh; refreshes during concurrent captures lose nothing.
+- **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; batched reads lag until a refresh; refreshes during concurrent captures lose nothing.
 - **Database invariants**: data goes in through the API, then raw SQL tries to go around it: unbalanced postings are rejected at commit, history is append-only, and a drifted stored balance shows up in `/v1/ledger/verify`.
-- **Engine level** (`ledger/`, the only tests below the API): a transaction held open across a snapshot refresh, and the TigerBeetle engine (retry idempotency, parity with Postgres), which needs an isolated id namespace per test.
+- **Ledger level** (`ledger/`, the only test below the API): a transaction held open across a snapshot refresh.
 
 Tests run against a real Postgres:
 - in the compose `test` service, a throwaway `postgres-test` (tmpfs);

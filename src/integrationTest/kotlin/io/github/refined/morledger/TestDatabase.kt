@@ -38,7 +38,7 @@ object TestDatabase {
         dataSource.transaction { conn ->
             conn.createStatement().use {
                 it.execute(
-                    "TRUNCATE refunds, payments, ledger.postings, ledger.journal_entries, ledger.balance_snapshots, ledger.accounts, ledger.tb_accounts RESTART IDENTITY",
+                    "TRUNCATE refunds, payments, ledger.postings, ledger.journal_entries, ledger.balance_snapshots, ledger.accounts RESTART IDENTITY",
                 )
                 it.execute("UPDATE ledger.snapshot_state SET boundary = '0', refreshed_at = now()")
             }

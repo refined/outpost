@@ -22,7 +22,7 @@ This service is the MoR's **ledger**: the source of truth for who is owed what. 
 - **handle several currencies**, each kept separately;
 - **show what each merchant did**: volume, refunds, fees, tax and the running balance, in a web console.
 
-The ledger engine is swappable: our own double-entry ledger on Postgres (default), or **TigerBeetle**, compared side by side under the same resource budget ([ledger comparison](docs/ledger-comparison.md), [performance](docs/performance.md)).
+The ledger is our own double-entry ledger on Postgres. Six ways of keeping balances, TigerBeetle among them, were benchmarked under the same resource budget before choosing ([ledger comparison](docs/ledger-comparison.md), [performance](docs/performance.md)).
 
 ## How it works
 
@@ -34,12 +34,11 @@ flowchart LR
     subgraph service["MoR ledger service"]
         API["REST API /v1"] --> PAY["Payments<br/>split, idempotency, refund limits"]
         API --> REP["Reports & analytics"]
-        PAY --> LED["Ledger engine<br/>journal + account balances"]
+        PAY --> LED["Ledger<br/>journal + account balances"]
         REP --> LED
     end
-    PAY --> DB[("PostgreSQL<br/>payments, refunds,<br/>default ledger")]
+    PAY --> DB[("PostgreSQL<br/>payments, refunds,<br/>ledger")]
     LED --> DB
-    LED -. "LEDGER_ENGINE=TIGERBEETLE" .-> TB[("TigerBeetle")]
 ```
 
 There are three ways in:
@@ -145,15 +144,9 @@ Only **Docker** is needed:
 ```bash
 docker compose up -d --build --wait                        # build and start Postgres + the service
 docker compose --profile tools run --rm k6 run seed.js     # optional: demo data, ~100 merchants / 100k payments over a year (~3 min)
-docker compose --profile test run --rm test                # run the test suite in a container (incl. a TigerBeetle)
-docker compose --profile test --profile tb down            # stop everything
-```
-
-The same stack on **TigerBeetle** instead of the Postgres ledger, and the benchmark of all engine variants:
-
-```bash
-LEDGER_ENGINE=TIGERBEETLE docker compose --profile tb up -d --build --wait
-perf/run-benchmarks.sh                                     # ~1 h; writes perf/results/<time>/summary.md
+docker compose --profile test run --rm test                # run the test suite in a container
+docker compose --profile test down                         # stop everything
+perf/run-benchmarks.sh                                     # optional: the benchmark (~25 min); perf/results/<time>/summary.md
 ```
 
 | URL | |
@@ -162,7 +155,7 @@ perf/run-benchmarks.sh                                     # ~1 h; writes perf/r
 | http://localhost:8090/docs/ | Swagger UI |
 | [docs/demo.http](docs/demo.http) | The demo scenario as HTTP requests |
 
-Ports, database credentials, the fee rate, the refund policy and the ledger engine settings can be changed in an optional `.env`. Start from [.env.example](.env.example); without a `.env`, the defaults apply.
+Ports, database credentials, the fee rate, the refund policy and the balance mode can be changed in an optional `.env`. Start from [.env.example](.env.example); without a `.env`, the defaults apply.
 
 ## Assumptions
 
@@ -177,10 +170,11 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
 
 ## Key trade-offs
 
-- **Own ledger on Postgres instead of TigerBeetle or Formance.** The payment and its journal entry commit in one transaction. An external ledger would turn every payment into a write to two systems that can disagree. The ledger engine is a small module that knows nothing about payments, so it can be replaced.
+- **Own ledger on Postgres instead of TigerBeetle or Formance.** The payment and its journal entry commit in one transaction. An external ledger would turn every payment into a write to two systems that can disagree. We integrated TigerBeetle and measured it: under the same 2 CPU / 3 GB budget it was the slowest variant, so it was removed. The ledger is a small module that knows nothing about payments, so it can still be replaced.
 - **Balances stored and updated synchronously, not recomputed on every read or fed from a queue.**
   - Reads are instant and always exact.
-  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. That is fine at this scale; beyond it: sub-accounts, batching, or TigerBeetle.
+  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. Measured, it is not the bottleneck: on 2 CPUs the service tops out at ~400 captures/s on CPU, even with every payment on one merchant.
+  - If it ever is: `BALANCE_MODE=BATCHED` takes the locks off the write path, and reads see balances up to one refresh (1 s) old.
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
 
 More, including concurrency alternatives, time handling, and what each out-of-scope feature would add: [docs/design.md](docs/design.md#trade-offs).

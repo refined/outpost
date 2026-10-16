@@ -15,10 +15,9 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 - **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency). Extras:
   - `asOf` reports, journal, analytics API and a multi-page console with per-merchant breakdowns;
   - a deterministic ~100k-payment demo dataset;
-  - a swappable ledger engine (Postgres stored/computed/sharded, or TigerBeetle);
-  - a benchmark of all variants under 2 CPUs / 3 GB.
+  - two balance modes (`STORED`, `BATCHED` snapshot with `/v1/ledger/lag`), chosen after benchmarking six variants (incl. TigerBeetle) under 2 CPUs / 3 GB; the other four were removed (docs/performance.md, commit `0ffcf3f` has them).
 
-  59 tests: 21 unit, 38 integration (3 need TigerBeetle and run in Docker/CI). CI runs the Docker path.
+  53 tests: 19 unit, 34 integration. CI runs the Docker path.
 - **Platforms:** must run on macOS, Linux and Windows. This is guaranteed by running everything in Linux containers (Docker / Docker Desktop).
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -35,7 +34,6 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 | CI | GitHub Actions, `.github/workflows/ci.yml` | One docker compose job: build image, smoke test through the API, tests in Docker |
 | Runtime | Docker: `Dockerfile` (multi-stage) + `docker-compose.yml` + optional `.env` (`.env.example`) | Host needs only Docker |
 | Build | Gradle 9.8.1 from the official `gradle:9.8.1-jdk21` Docker image; Kotlin DSL; versions inline in `build.gradle.kts` | **No wrapper** (user decision: everything via Docker). Host builds need a local Gradle 9 |
-| Optional engine | TigerBeetle 0.17.9 (server image + `tigerbeetle-java` client), profile `tb` | Needs `seccomp=unconfined` (io_uring) for the server **and** the app/test containers (the client uses io_uring too) |
 | Console | Vanilla JS, hash router; Chart.js 4.5.1 + chartjs-chart-sankey 0.19.1 from jsDelivr (pinned) | Colours from the dataviz reference palette, light + dark |
 | Load / data | k6 (`grafana/k6:2.3.0`, compose profile `tools`), scripts in `perf/k6` | `seed.js` (demo data), `bench.js` (benchmark steps) |
 
@@ -57,20 +55,18 @@ docs/domain/                     MoR background: VAT, money flows, ledger postin
 build.gradle.kts, settings.gradle.kts  Gradle build (no wrapper; versions inline)
 Dockerfile, .dockerignore        image build (gradle:9.8.1-jdk21 -> JRE 21)
 perf/k6/                         lib.js (deterministic data), seed.js (demo dataset), bench.js (one benchmark step)
-perf/compose.limits.yml          resource limits override (2 CPUs / 3 GB for app + db [+ TigerBeetle])
+perf/compose.limits.yml          resource limits override (2 CPUs / 3 GB for app + db)
 perf/run-benchmarks.sh           runs all engine variants, writes perf/results/<time>/summary.md (results are gitignored)
-docs/ledger-comparison.md        platforms compared + the decision; docs/performance.md: benchmark method and results
+docs/ledger-comparison.md        platforms compared + the decision; docs/performance.md: benchmark method, results of 6 variants
 src/main/kotlin/io/github/refined/morledger/
   Application.kt                 main(), AppConfig (env), Application.module()
   money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
-  ledger/Ledger.kt               LedgerEngine interface + model (Account, Posting, JournalEntry, AccountBalance)
-  ledger/PostgresLedger.kt       default engine: BALANCE_MODE=STORED (running balances) | COMPUTED (sum on read) | SNAPSHOT | BATCHED (snapshot refresh)
-  ledger/TigerBeetleLedger.kt    LEDGER_ENGINE=TIGERBEETLE: linked transfers, deterministic ids, dual write with Postgres
-  ledger/ChartOfAccounts.kt      account codes + postings for capture/refund; HOT_ACCOUNT_SHARDS (#k suffix)
+  ledger/Ledger.kt               model + Ledger: post, balances (BALANCE_MODE=STORED running balances | BATCHED snapshot), refresh, lag, verify, entries
+  ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
   payments/                      PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
-  reports/BalanceReport.kt       ledger balances -> report (folds shards)
+  reports/BalanceReport.kt       ledger balances -> report
   reports/Analytics.kt           summary / timeseries / per-merchant breakdown from payments+refunds, reconciled with the ledger
-  api/                           Routes, AnalyticsRoutes, Dto (wire format), Errors (DomainException -> HTTP status; unsupported -> 501)
+  api/                           Routes, AnalyticsRoutes, Dto (wire format), Errors (DomainException -> HTTP status)
   db/Database.kt                 Hikari + Flyway, DataSource.transaction { }
 src/main/resources/
   db/migration/                  V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
@@ -88,9 +84,8 @@ docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + a
 docker compose --profile test run --rm test      # test suite in the build stage, against postgres-test (tmpfs)
 docker compose logs -f app
 docker compose --profile tools run --rm k6 run seed.js                     # demo data (~100k payments, ~3 min)
-LEDGER_ENGINE=TIGERBEETLE docker compose --profile tb up -d --build --wait # same stack on TigerBeetle
-perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-computed pg-snapshot pg-batched pg-sharded tigerbeetle
-docker compose --profile test --profile tb down  # stop everything; -v also drops pgdata/tbdata
+perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-batched
+docker compose --profile test down               # stop everything; -v also drops pgdata
 ```
 
 Host workflow (optional, for fast edit-run loops; needs JDK 17+ and Gradle 9 installed):
@@ -102,7 +97,7 @@ gradle build                  # compile + both suites (integration via Testconta
 gradle run                    # service on http://localhost:8090 (stop the app container first: same port)
 ```
 
-Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`), `LEDGER_ENGINE` (`POSTGRES` | `TIGERBEETLE`), `TB_ADDRESS`, `BALANCE_MODE` (`STORED` | `COMPUTED` | `SNAPSHOT` | `BATCHED`), `BALANCE_REFRESH_MS` (1000), `HOT_ACCOUNT_SHARDS` (1).
+Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`), `BALANCE_MODE` (`STORED` | `BATCHED`), `BALANCE_REFRESH_MS` (1000).
 
 URLs: `/ui/` demo console, `/docs/` Swagger, `/openapi.yaml` spec. **Keep `openapi.yaml` in sync with `api/Dto.kt` and `api/Routes.kt`.**
 
@@ -123,7 +118,7 @@ On failure it prints the container logs. Until 2026-10-14 there was also a Gradl
 
 Rules:
 - Code must stay cross-platform: no shell-specific build steps; use `java.nio.file` paths, not string concatenation.
-- Tests go through the HTTP API (`src/integrationTest`, helpers in `api/ApiSupport.kt`). Unit tests (`src/test`) are only for pure functions that need no setup. Go below the API only when the scenario cannot be set up through it (raw-SQL tampering, a transaction held open, TigerBeetle namespaces), and say why in the test.
+- Tests go through the HTTP API (`src/integrationTest`, helpers in `api/ApiSupport.kt`). Unit tests (`src/test`) are only for pure functions that need no setup. Go below the API only when the scenario cannot be set up through it (raw-SQL tampering, a transaction held open), and say why in the test.
 - A test that needs the database uses `TestDatabase.dataSource`; never start a separate container per test class.
 
 ## Environment notes
@@ -134,7 +129,7 @@ Rules:
 - The repo is public. Pushing straight to `main` is fine for now; never force-push. Keep CI green: run the tests (`docker compose --profile test run --rm test`) before pushing.
 - Prefer the Docker workflow. If you use `gradle run` from a background shell, killing the shell leaves the JVM running (Windows); free port 8090 (stop the `java.exe` owning it) before restarting, or you will be testing the old build.
 - After changing code, `docker compose up -d --build --wait` rebuilds the image; without `--build` the old image keeps running.
-- **Env-dependent settings + `depends_on` gotcha:** `docker compose run k6` recreates `app` if the compose config differs. A variable like `LEDGER_ENGINE` set only for the first command silently flips the app back to the default. Export such variables for the whole session (the benchmark script does), or use `run --no-deps`.
+- **Env-dependent settings + `depends_on` gotcha:** `docker compose run k6` recreates `app` if the compose config differs. A variable like `BALANCE_MODE` set only for the first command silently flips the app back to the default. Export such variables for the whole session (the benchmark script does), or use `run --no-deps`.
 - In Git Bash, container paths in `docker run` arguments get rewritten (`/scripts` → `C:/Program Files/Git/scripts`); the k6 service runs from `/scripts` so scripts are passed by name; use `MSYS_NO_PATHCONV=1` otherwise.
 - Benchmarks: run them on an otherwise idle Docker host. The stack is CPU-limited, but k6 is not, and it shares the VM.
 - The browser caches the console aggressively; it is served `no-cache`, but a page already open needs a reload after a rebuild.
@@ -200,12 +195,12 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 | 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
 | 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → short assumptions and trade-offs. Details go to `docs/design.md` |
-| 22 | Ledger engine | `LedgerEngine` interface; `PostgresLedger` (default) and `TigerBeetleLedger`. Knobs: `LEDGER_ENGINE`, `BALANCE_MODE`, `HOT_ACCOUNT_SHARDS`; a test proves every mode reports identical balances. SNAPSHOT/BATCHED refresh by transaction id (`pg_snapshot_xmin`), not entry id, so late commits are never skipped; `/v1/ledger/lag` reports staleness |
-| 23 | TigerBeetle mapping | Account id = hash(code, currency); ledger = ISO numeric currency; entry = linked transfers (credit lines paired with debit lines); transfer ids from (kind, payment, refund, index); a retry = `Exists` + `LinkedEventFailed`; transfers sent inside the PG transaction before commit (dual write, documented); `asOf`/journal → 501 |
-| 24 | Analytics | Computed from the business tables (engine-agnostic); `reconciled` = records-based merchant balance == ledger balance |
+| 22 | Balance modes | One `Ledger` class; `BALANCE_MODE=STORED` (default) or `BATCHED`; a test proves both report identical balances. BATCHED refreshes by transaction id (`pg_snapshot_xmin`), not entry id, so late commits are never skipped; `/v1/ledger/lag` reports staleness |
+| 23 | Removed variants (2026-10-16) | COMPUTED, SNAPSHOT, hot-account sharding and the TigerBeetle engine were benchmarked and removed: no throughput gain on 2 CPUs, slow reads (COMPUTED/SNAPSHOT), TB starved by 2.3 GB static memory + dual write. Findings in docs/performance.md and docs/ledger-comparison.md; code at commit `0ffcf3f` |
+| 24 | Analytics | Computed from the business tables; `reconciled` = records-based merchant balance == ledger balance |
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |
 | 26 | Demo data | `perf/k6/seed.js`: deterministic (SEED), idempotent (PREFIX); ~100 Zipf-sized merchants, 3 currencies, 9 jurisdictions, ~7% refunds, 4 refund-heavy anomalies |
-| 27 | Benchmark | 2 CPUs / 3 GB per variant (Postgres variants: app 1.0/1280M + db 1.0/1792M; TigerBeetle: app 0.8/384M + db 0.4/256M + TB 0.8/2432M, since TB allocates ~2.3 GB statically). Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors |
+| 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; a lag probe records BATCHED staleness |
 
 ## Ideas not done (candidates if time allows)
 

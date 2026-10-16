@@ -11,7 +11,7 @@ class JournalEntryValidationTest {
 
     @Test
     fun `zero lines are dropped`() {
-        val lines = LedgerEngine.validated(entry(ChartOfAccounts.capture("EUR", "NL", "m_1", Split(tax = 0, fee = 0, merchant = 500))))
+        val lines = Ledger.validated(entry(ChartOfAccounts.capture("EUR", "NL", "m_1", Split(tax = 0, fee = 0, merchant = 500))))
 
         assertEquals(listOf(500L, -500L), lines.map { it.amount })
     }
@@ -20,32 +20,30 @@ class JournalEntryValidationTest {
     fun `an unbalanced entry is rejected`() {
         val postings = ChartOfAccounts.capture("EUR", "NL", "m_1", Split(0, 0, 100)) + Posting(ChartOfAccounts.feeRevenue("EUR"), -1)
 
-        assertFailsWith<IllegalArgumentException> { LedgerEngine.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
     }
 
     @Test
     fun `an entry mixing currencies is rejected`() {
         val postings = listOf(Posting(ChartOfAccounts.pspClearing("EUR"), 100), Posting(ChartOfAccounts.feeRevenue("USD"), -100))
 
-        assertFailsWith<IllegalArgumentException> { LedgerEngine.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
     }
 
     @Test
     fun `an entry needs at least two non-zero lines`() {
         val postings = listOf(Posting(ChartOfAccounts.pspClearing("EUR"), 0), Posting(ChartOfAccounts.feeRevenue("EUR"), 0))
 
-        assertFailsWith<IllegalArgumentException> { LedgerEngine.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
     }
 
     @Test
-    fun `a refund mirrors the capture on the same shard`() {
+    fun `a refund mirrors the capture`() {
         val split = Split(tax = 2100, fee = 605, merchant = 9395)
-        val shard = ChartOfAccounts.shardOf("p_7", 8)
 
-        val capture = ChartOfAccounts.capture("EUR", "NL", "m_1", split, shard)
-        val refund = ChartOfAccounts.refund("EUR", "NL", "m_1", split, shard)
+        val capture = ChartOfAccounts.capture("EUR", "NL", "m_1", split)
+        val refund = ChartOfAccounts.refund("EUR", "NL", "m_1", split)
 
         assertEquals(capture.map { it.copy(amount = -it.amount) }, refund)
-        assertEquals(shard, ChartOfAccounts.shardOf("p_7", 8), "the shard is stable for a payment id")
     }
 }

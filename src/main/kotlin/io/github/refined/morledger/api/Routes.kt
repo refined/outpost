@@ -2,7 +2,7 @@ package io.github.refined.morledger.api
 
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
-import io.github.refined.morledger.ledger.LedgerEngine
+import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.payments.CaptureCommand
 import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.PaymentStatus
@@ -44,13 +44,13 @@ data class MismatchDto(val code: String, val currency: String, val stored: Long,
 data class VerifyResponse(val ok: Boolean, val mismatches: List<MismatchDto>)
 
 @Serializable
-data class LagResponse(val pendingEntries: Long, val oldestPendingAgeMs: Long, val readLagMs: Long, val refreshedAt: String?)
+data class LagResponse(val pendingEntries: Long, val readLagMs: Long, val refreshedAt: String?)
 
 fun Application.routes(
     dataSource: DataSource,
     payments: PaymentService,
     reports: BalanceReport,
-    ledger: LedgerEngine,
+    ledger: Ledger,
     analytics: Analytics,
 ) {
     routing {
@@ -144,7 +144,7 @@ fun Application.routes(
 
             get("/ledger/lag") {
                 val lag = dataSource.transaction { ledger.lag(it) }
-                call.respond(LagResponse(lag.pendingEntries, lag.oldestPendingAgeMs, lag.readLagMs, lag.refreshedAt?.toString()))
+                call.respond(LagResponse(lag.pendingEntries, lag.readLagMs, lag.refreshedAt?.toString()))
             }
 
             analyticsRoutes(analytics)

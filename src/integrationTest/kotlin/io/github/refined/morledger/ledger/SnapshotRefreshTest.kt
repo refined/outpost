@@ -3,16 +3,16 @@ package io.github.refined.morledger.ledger
 import io.github.refined.morledger.TestDatabase
 import io.github.refined.morledger.db.transaction
 import org.junit.jupiter.api.Test
+import java.time.Instant
 import kotlin.test.assertEquals
 
 /** Engine level: an open transaction spanning a refresh cannot be set up through the API. */
 class SnapshotRefreshTest {
     private val dataSource = TestDatabase.dataSource
-    private val t0 = SampleFlow.t0
-    private val snapshot = PostgresLedger(BalanceMode.SNAPSHOT)
-    private val batched = PostgresLedger(BalanceMode.BATCHED)
+    private val t0 = Instant.parse("2026-10-01T10:00:00Z")
+    private val batched = Ledger(BalanceMode.BATCHED)
 
-    private fun balances(engine: LedgerEngine) = dataSource.transaction { engine.balances(it) }.associate { it.account.code to it.signedSum }
+    private fun balances() = dataSource.transaction { batched.balances(it) }.associate { it.account.code to it.signedSum }
 
     private fun refresh() = dataSource.transaction { batched.refreshBalances(it) }
 
@@ -28,10 +28,10 @@ class SnapshotRefreshTest {
             refresh()
         }
         assertEquals(1, dataSource.transaction { batched.lag(it) }.pendingEntries, "committed after the refresh began")
-        assertEquals(500, balances(snapshot).getValue("psp_clearing"))
+        assertEquals(0, balances().getValue("psp_clearing"))
 
         refresh()
-        assertEquals(500, balances(batched).getValue("psp_clearing"))
+        assertEquals(500, balances().getValue("psp_clearing"))
         assertEquals(emptyList(), dataSource.transaction { batched.verify(it) })
     }
 }

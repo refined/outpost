@@ -20,9 +20,3 @@ services:
           cpus: "${PG_CPUS:-1.0}"
           memory: ${PG_MEM:-1792M}
 
-  tigerbeetle:
-    deploy:
-      resources:
-        limits:
-          cpus: "${TB_CPUS:-0.8}"
-          memory: ${TB_MEM:-2432M}

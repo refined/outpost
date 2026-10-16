@@ -125,7 +125,7 @@ paths:
   /v1/ledger/accounts:
     get:
       tags: [Reports]
-      summary: Every ledger account with its current balance (hot-account shards listed separately)
+      summary: Every ledger account with its current balance
       parameters:
         - { name: currency, in: query, required: false, schema: { type: string } }
       responses:
@@ -141,10 +141,10 @@ paths:
   /v1/ledger/lag:
     get:
       tags: [Reports]
-      summary: How far the balance snapshot is behind (BALANCE_MODE=SNAPSHOT / BATCHED; zeros otherwise)
+      summary: How far the balance snapshot is behind (BALANCE_MODE=BATCHED; zeros otherwise)
       description: >
         `pendingEntries` wait for the next snapshot refresh. `readLagMs` is how stale a current-balance read can be:
-        the age of the oldest pending entry in BATCHED mode, 0 when reads are exact.
+        the age of the oldest pending entry.
       responses:
         '200':
           description: Lag
@@ -154,7 +154,6 @@ paths:
                 type: object
                 properties:
                   pendingEntries: { type: integer, format: int64 }
-                  oldestPendingAgeMs: { type: integer, format: int64 }
                   readLagMs: { type: integer, format: int64 }
                   refreshedAt: { type: string, format: date-time, nullable: true }
 
@@ -364,5 +363,5 @@ components:
       properties:
         error:
           type: string
-          enum: [invalid_request, payment_not_found, merchant_not_found, idempotency_conflict, refund_exceeds_refundable, payment_fully_refunded, refund_before_capture, amount_too_small, not_supported_by_ledger_engine, internal_error]
+          enum: [invalid_request, payment_not_found, merchant_not_found, idempotency_conflict, refund_exceeds_refundable, payment_fully_refunded, refund_before_capture, amount_too_small, internal_error]
         message: { type: string }

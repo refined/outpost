@@ -121,14 +121,6 @@ CREATE TRIGGER journal_entries_append_only BEFORE UPDATE OR DELETE ON ledger.jou
 CREATE TRIGGER postings_append_only BEFORE UPDATE OR DELETE ON ledger.postings
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();
 
-CREATE TABLE ledger.tb_accounts (
-    id          NUMERIC(39) PRIMARY KEY,          -- u128
-    code        TEXT    NOT NULL,
-    currency    CHAR(3) NOT NULL,
-    normal_side TEXT    NOT NULL CHECK (normal_side IN ('DEBIT', 'CREDIT')),
-    UNIQUE (code, currency)
-);
-
 CREATE TABLE payments (
     payment_id        TEXT PRIMARY KEY,           -- external event id = idempotency key
     merchant_id       TEXT          NOT NULL,

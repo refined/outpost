@@ -3,9 +3,8 @@ package io.github.refined.morledger.payments
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
-import io.github.refined.morledger.ledger.LedgerEngine
+import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.ledger.NewJournalEntry
-import io.github.refined.morledger.ledger.PostgresLedger
 import io.github.refined.morledger.money.Allocation
 import java.math.BigDecimal
 import java.security.MessageDigest
@@ -20,8 +19,7 @@ class PaymentService(
     private val dataSource: DataSource,
     private val pricing: PricingSettings = PricingSettings(),
     private val clock: Clock = Clock.systemUTC(),
-    private val ledger: LedgerEngine = PostgresLedger(),
-    private val hotAccountShards: Int = 1,
+    private val ledger: Ledger = Ledger(),
 ) {
     fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
         validateId("paymentId", cmd.paymentId)
@@ -57,7 +55,6 @@ class PaymentService(
         return dataSource.transaction { conn ->
             val created = PaymentRepository.insertPayment(conn, payment, fingerprint)
             if (created) {
-                val shard = ChartOfAccounts.shardOf(payment.paymentId, hotAccountShards)
                 ledger.post(
                     conn,
                     NewJournalEntry(
@@ -65,7 +62,7 @@ class PaymentService(
                         paymentId = payment.paymentId,
                         refundId = null,
                         effectiveAt = capturedAt,
-                        postings = ChartOfAccounts.capture(currency, jurisdiction, payment.merchantId, split, shard),
+                        postings = ChartOfAccounts.capture(currency, jurisdiction, payment.merchantId, split),
                     ),
                 )
             } else {
@@ -118,7 +115,6 @@ class PaymentService(
                 // The same refundId was just recorded for another payment (that payment's lock didn't stop us).
                 throw ConflictException("idempotency_conflict", "refund ${cmd.refundId} already exists")
             }
-            val shard = ChartOfAccounts.shardOf(payment.paymentId, hotAccountShards)
             ledger.post(
                 conn,
                 NewJournalEntry(
@@ -126,7 +122,7 @@ class PaymentService(
                     paymentId = payment.paymentId,
                     refundId = refund.refundId,
                     effectiveAt = refundedAt,
-                    postings = ChartOfAccounts.refund(payment.currency, payment.taxJurisdiction, payment.merchantId, refund.split, shard),
+                    postings = ChartOfAccounts.refund(payment.currency, payment.taxJurisdiction, payment.merchantId, refund.split),
                 ),
             )
             val after = PaymentRepository.details(conn, payment.paymentId)!!

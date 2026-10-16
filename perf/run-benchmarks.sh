@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Benchmarks the ledger engine variants under the same budget: 2 CPUs and 3 GB for the whole system under test
-# (app + Postgres [+ TigerBeetle]). k6 runs outside the limit. Results: perf/results/<timestamp>/summary.md
+# Benchmarks the balance modes under the same budget: 2 CPUs and 3 GB for app + Postgres. k6 runs outside the limit.
+# Results: perf/results/<timestamp>/summary.md. The six-variant comparison in docs/performance.md ran at commit 0ffcf3f.
 #
-#   perf/run-benchmarks.sh                      # all variants
-#   perf/run-benchmarks.sh pg-stored tigerbeetle # some of them
+#   perf/run-benchmarks.sh             # both variants
+#   perf/run-benchmarks.sh pg-batched  # one of them
 #
 # Needs only Docker and bash (Git Bash on Windows). Each variant starts from empty volumes.
 set -euo pipefail
@@ -13,34 +13,25 @@ export MSYS_NO_PATHCONV=1 # Git Bash: don't rewrite /results paths
 STAMP=$(date +%Y%m%d-%H%M%S)
 OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
-BASE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
-COMPOSE=("${BASE[@]}")
+COMPOSE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
 RATES=(200 250 300 350 400 500 600 800 1000)
 STEP=20s
 
-# name | engine settings | resource split (app / postgres / tigerbeetle), totalling 2 CPUs and 3072 MB
+LIMITS="APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB"
 variant_env() {
   case "$1" in
-    pg-stored)   echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=1 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
-    pg-computed) echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=COMPUTED HOT_ACCOUNT_SHARDS=1 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
-    pg-sharded)  echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=8 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
-    pg-snapshot) echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=SNAPSHOT HOT_ACCOUNT_SHARDS=1 BALANCE_REFRESH_MS=1000 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
-    pg-batched)  echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=BATCHED HOT_ACCOUNT_SHARDS=1 BALANCE_REFRESH_MS=1000 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
-    tigerbeetle) echo "LEDGER_ENGINE=TIGERBEETLE BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=1 APP_CPUS=0.8 APP_MEM=384M PG_CPUS=0.4 PG_MEM=256M PG_SHARED_BUFFERS=64MB TB_CPUS=0.8 TB_MEM=2432M" ;;
+    pg-stored)  echo "BALANCE_MODE=STORED $LIMITS" ;;
+    pg-batched) echo "BALANCE_MODE=BATCHED BALANCE_REFRESH_MS=1000 $LIMITS" ;;
     *) echo "unknown variant $1" >&2; exit 1 ;;
   esac
 }
 
-k6() { "${COMPOSE[@]}" run --rm --no-deps -e VARIANT="$VARIANT" "$@" k6 run --quiet "${SCRIPT}" 2>&1 | grep -E "^(local|pg-|tigerbeetle|seed:)" || true; }
+k6() { "${COMPOSE[@]}" run --rm --no-deps -e VARIANT="$VARIANT" "$@" k6 run --quiet "${SCRIPT}" 2>&1 | grep -E "^(local|pg-|seed:)" || true; }
 
 reset_stack() {
-  "${BASE[@]}" --profile tb down --remove-orphans >/dev/null 2>&1 || true
-  docker volume rm -f outpost_pgdata outpost_tbdata >/dev/null 2>&1 || true
-  # The tb profile only for the TigerBeetle variant: otherwise its 2.3 GB would sit idle next to the Postgres variants.
-  COMPOSE=("${BASE[@]}")
-  local services=(postgres app)
-  if [ "$LEDGER_ENGINE" = TIGERBEETLE ]; then COMPOSE=("${BASE[@]}" --profile tb); services=(postgres tigerbeetle app); fi
-  "${COMPOSE[@]}" up -d --build --wait "${services[@]}" >/dev/null
+  "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+  docker volume rm -f outpost_pgdata >/dev/null 2>&1 || true
+  "${COMPOSE[@]}" up -d --build --wait postgres app >/dev/null
   echo "  stack: $(curl -s http://127.0.0.1:8090/health)"
 }
 
@@ -137,7 +128,7 @@ summarise() {
 }
 
 VARIANTS=("$@")
-[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-computed pg-snapshot pg-batched pg-sharded tigerbeetle)
+[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-batched)
 for v in "${VARIANTS[@]}"; do run_variant "$v"; done
 summarise "${VARIANTS[@]}"
-"${BASE[@]}" --profile tb down >/dev/null 2>&1 || true
+"${COMPOSE[@]}" down >/dev/null 2>&1 || true

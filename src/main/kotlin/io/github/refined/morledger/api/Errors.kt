@@ -1,6 +1,5 @@
 package io.github.refined.morledger.api
 
-import io.github.refined.morledger.ledger.UnsupportedLedgerOperation
 import io.github.refined.morledger.payments.ConflictException
 import io.github.refined.morledger.payments.DomainException
 import io.github.refined.morledger.payments.NotFoundException
@@ -31,9 +30,6 @@ fun Application.installErrorHandling() {
     install(StatusPages) {
         exception<DomainException> { call, e ->
             call.respond(e.status(), ErrorResponse(e.code, e.message ?: e.code))
-        }
-        exception<UnsupportedLedgerOperation> { call, e ->
-            call.respond(HttpStatusCode.NotImplemented, ErrorResponse("not_supported_by_ledger_engine", e.message ?: "not supported"))
         }
         exception<BadRequestException> { call, e ->
             val detail = generateSequence<Throwable>(e) { it.cause }.last().message ?: "malformed request"

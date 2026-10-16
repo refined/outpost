@@ -2,8 +2,7 @@ package io.github.refined.morledger.reports
 
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
-import io.github.refined.morledger.ledger.LedgerEngine
-import io.github.refined.morledger.ledger.PostgresLedger
+import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.payments.NotFoundException
 import io.github.refined.morledger.payments.ValidationException
 import java.sql.Connection
@@ -67,7 +66,7 @@ enum class MerchantSort(val sql: String) {
     MERCHANT("merchant_id"),
 }
 
-class Analytics(private val dataSource: DataSource, private val ledger: LedgerEngine = PostgresLedger()) {
+class Analytics(private val dataSource: DataSource, private val ledger: Ledger = Ledger()) {
 
     fun summary(currency: String?, from: Instant?, to: Instant?): List<CurrencySummary> = dataSource.transaction { conn ->
         val captured = flows(conn, "p.currency", currency, null, from, to, refunds = false).associateBy { it.first }

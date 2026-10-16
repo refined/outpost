@@ -27,7 +27,7 @@ fun api(
     ledger: LedgerSettings = LedgerSettings(),
     block: suspend ApplicationTestBuilder.() -> Unit,
 ) = testApplication {
-    application { module(TestDatabase.dataSource, pricing, ledger = ledger) }
+    application { module(TestDatabase.dataSource, pricing, settings = ledger) }
     block()
 }
 

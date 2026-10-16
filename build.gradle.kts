@@ -41,7 +41,6 @@ dependencies {
     implementation("io.ktor:ktor-server-status-pages:$ktor")
     implementation("io.ktor:ktor-serialization-kotlinx-json:$ktor")
     implementation("com.zaxxer:HikariCP:7.1.0")
-    implementation("com.tigerbeetle:tigerbeetle-java:0.17.9") // optional engine: LEDGER_ENGINE=TIGERBEETLE
     implementation("org.flywaydb:flyway-core:$flyway")
     runtimeOnly("org.flywaydb:flyway-database-postgresql:$flyway")
     runtimeOnly("org.postgresql:postgresql:42.7.14")

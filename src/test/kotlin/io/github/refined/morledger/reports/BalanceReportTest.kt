@@ -8,17 +8,16 @@ import kotlin.test.assertEquals
 
 class BalanceReportTest {
     private fun balance(code: String, signedSum: Long, currency: String = "EUR") =
-        AccountBalance(Account(code, currency, if (code.startsWith("psp_clearing")) NormalSide.DEBIT else NormalSide.CREDIT), signedSum)
+        AccountBalance(Account(code, currency, if (code == "psp_clearing") NormalSide.DEBIT else NormalSide.CREDIT), signedSum)
 
     @Test
-    fun `hot-account shards are folded back into one line`() {
-        // One capture of 12_100 (tax 2_100, fee 605, merchant 9_395) spread over two shards.
+    fun `accounts are grouped into tax owed, merchant balances and the MoR position`() {
+        // One capture of 12_100: tax 2_100, fee 605, merchant 9_395.
         val report = BalanceReport.fromLedger(
             listOf(
-                balance("psp_clearing#0", 7_000),
-                balance("psp_clearing#1", 5_100),
-                balance("tax_payable:NL#0", -2_100),
-                balance("fee_revenue#1", -605),
+                balance("psp_clearing", 12_100),
+                balance("tax_payable:NL", -2_100),
+                balance("fee_revenue", -605),
                 balance("merchant_payable:m_1", -9_395),
             ),
             asOf = null,
