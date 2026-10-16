@@ -87,12 +87,40 @@ object PaymentRepository {
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.toRefund()) } }
         }
 
-    /** Most recently recorded payments first. */
-    fun recentDetails(conn: Connection, limit: Int): List<PaymentDetails> =
-        conn.prepareStatement("SELECT $PAYMENT_COLUMNS FROM payments ORDER BY recorded_at DESC, payment_id LIMIT ?").use { st ->
-            st.setInt(1, limit)
+    /**
+     * A page of payments, latest capture first, optionally for one merchant and/or one status. Returns (total, page).
+     * The status is derived from the refunded amount, the same way [PaymentDetails.status] does.
+     */
+    fun page(conn: Connection, merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): Pair<Long, List<PaymentDetails>> {
+        val base = """
+            SELECT p.*, CASE WHEN COALESCE(r.refunded, 0) = 0 THEN 'CAPTURED'
+                             WHEN r.refunded < p.amount THEN 'PARTIALLY_REFUNDED'
+                             ELSE 'REFUNDED' END AS status
+            FROM payments p
+            LEFT JOIN (SELECT payment_id, sum(amount) AS refunded FROM refunds GROUP BY payment_id) r ON r.payment_id = p.payment_id
+            WHERE CAST(? AS TEXT) IS NULL OR p.merchant_id = CAST(? AS TEXT)
+        """.trimIndent()
+        val statusFilter = "WHERE CAST(? AS TEXT) IS NULL OR x.status = CAST(? AS TEXT)"
+        fun java.sql.PreparedStatement.bindFilters() {
+            setString(1, merchantId)
+            setString(2, merchantId)
+            setString(3, status?.name)
+            setString(4, status?.name)
+        }
+        val total = conn.prepareStatement("SELECT count(*) FROM ($base) x $statusFilter").use { st ->
+            st.bindFilters()
+            st.executeQuery().use { rs -> rs.next(); rs.getLong(1) }
+        }
+        val payments = conn.prepareStatement(
+            "SELECT * FROM ($base) x $statusFilter ORDER BY captured_at DESC, recorded_at DESC, payment_id LIMIT ? OFFSET ?",
+        ).use { st ->
+            st.bindFilters()
+            st.setInt(5, limit)
+            st.setInt(6, offset)
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.toPayment()) } }
-        }.map { PaymentDetails(it, refundsOf(conn, it.paymentId)) }
+        }
+        return total to payments.map { PaymentDetails(it, refundsOf(conn, it.paymentId)) }
+    }
 
     fun details(conn: Connection, paymentId: String): PaymentDetails? =
         findPayment(conn, paymentId)?.let { PaymentDetails(it.value, refundsOf(conn, paymentId)) }

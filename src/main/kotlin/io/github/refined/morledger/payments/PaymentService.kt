@@ -141,7 +141,8 @@ class PaymentService(
         }
     }
 
-    fun recent(limit: Int): List<PaymentDetails> = dataSource.transaction { PaymentRepository.recentDetails(it, limit) }
+    fun page(merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): Pair<Long, List<PaymentDetails>> =
+        dataSource.transaction { PaymentRepository.page(it, merchantId, status, limit, offset) }
 
     fun get(paymentId: String): PaymentDetails =
         dataSource.transaction { PaymentRepository.details(it, paymentId) }

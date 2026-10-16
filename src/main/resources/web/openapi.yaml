@@ -15,21 +15,30 @@ servers:
 tags:
   - name: Payments
   - name: Reports
+  - name: Analytics
+    description: Read-only aggregates for the demo console (totals, time series, per-merchant breakdown).
   - name: Ops
 
 paths:
   /v1/payments:
     get:
       tags: [Payments]
-      summary: List recent payments (most recently recorded first)
+      summary: List payments (latest capture first), filtered and paged
       parameters:
+        - { name: merchantId, in: query, required: false, schema: { type: string } }
+        - { name: status, in: query, required: false, schema: { type: string, enum: [CAPTURED, PARTIALLY_REFUNDED, REFUNDED] } }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 50 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
       responses:
         '200':
           description: Payments
           content:
             application/json:
-              schema: { type: object, properties: { payments: { type: array, items: { $ref: '#/components/schemas/Payment' } } } }
+              schema:
+                type: object
+                properties:
+                  payments: { type: array, items: { $ref: '#/components/schemas/Payment' } }
+                  total: { type: integer, format: int64, description: Number of payments matching the filters }
     post:
       tags: [Payments]
       summary: Capture a payment
@@ -107,9 +116,62 @@ paths:
       summary: Journal entries with their debit and credit lines (most recent first)
       parameters:
         - { name: paymentId, in: query, required: false, schema: { type: string } }
+        - { name: merchantId, in: query, required: false, schema: { type: string }, description: Entries that touch the merchant's account }
+        - { name: before, in: query, required: false, schema: { type: integer, format: int64 }, description: Keyset paging - entries with a smaller id }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 100 } }
       responses:
         '200': { description: Entries, content: { application/json: { schema: { $ref: '#/components/schemas/Journal' } } } }
+
+  /v1/analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Totals per currency, by tax jurisdiction
+      description: Captured and refunded money split into tax, MoR fee and merchant share. `from`/`to` filter on event time.
+      parameters:
+        - { name: currency, in: query, required: false, schema: { type: string } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: Summary, content: { application/json: { schema: { type: object } } } }
+
+  /v1/analytics/timeseries:
+    get:
+      tags: [Analytics]
+      summary: Captured vs refunded per day / week / month, with the running merchant balance
+      parameters:
+        - { name: currency, in: query, required: true, schema: { type: string }, example: EUR }
+        - { name: merchantId, in: query, required: false, schema: { type: string } }
+        - { name: bucket, in: query, required: false, schema: { type: string, enum: [day, week, month], default: day } }
+        - { name: from, in: query, required: false, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: false, schema: { type: string, format: date-time } }
+      responses:
+        '200': { description: Points, content: { application/json: { schema: { type: object } } } }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /v1/analytics/merchants:
+    get:
+      tags: [Analytics]
+      summary: Per-merchant breakdown, reconciled against the ledger
+      description: One row per merchant and currency. `reconciled` is true when the balance from the business records equals the merchant's ledger balance.
+      parameters:
+        - { name: currency, in: query, required: false, schema: { type: string } }
+        - { name: q, in: query, required: false, schema: { type: string }, description: Merchant id contains }
+        - { name: sort, in: query, required: false, schema: { type: string, enum: [gross, payments, refundRate, refunded, fee, balance, lastPayment, merchant], default: gross } }
+        - { name: order, in: query, required: false, schema: { type: string, enum: [asc, desc], default: desc } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
+      responses:
+        '200': { description: Merchants, content: { application/json: { schema: { type: object } } } }
+
+  /v1/analytics/merchants/{merchantId}:
+    get:
+      tags: [Analytics]
+      summary: One merchant per currency, by jurisdiction
+      parameters:
+        - { name: merchantId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Merchant, content: { application/json: { schema: { type: object } } } }
+        '404': { $ref: '#/components/responses/Error' }
 
   /health:
     get:
@@ -266,5 +328,5 @@ components:
       properties:
         error:
           type: string
-          enum: [invalid_request, payment_not_found, idempotency_conflict, refund_exceeds_refundable, payment_fully_refunded, refund_before_capture, amount_too_small, internal_error]
+          enum: [invalid_request, payment_not_found, merchant_not_found, idempotency_conflict, refund_exceeds_refundable, payment_fully_refunded, refund_before_capture, amount_too_small, not_supported_by_ledger_engine, internal_error]
         message: { type: string }

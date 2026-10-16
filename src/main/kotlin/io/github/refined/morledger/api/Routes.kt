@@ -5,8 +5,10 @@ import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.LedgerEngine
 import io.github.refined.morledger.payments.CaptureCommand
 import io.github.refined.morledger.payments.PaymentService
+import io.github.refined.morledger.payments.PaymentStatus
 import io.github.refined.morledger.payments.RefundCommand
 import io.github.refined.morledger.payments.ValidationException
+import io.github.refined.morledger.reports.Analytics
 import io.github.refined.morledger.reports.BalanceReport
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -22,14 +24,18 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.serialization.Serializable
 import java.math.BigDecimal
-import java.time.Instant
-import java.time.format.DateTimeParseException
 import javax.sql.DataSource
 
 @Serializable
 data class HealthResponse(val status: String)
 
-fun Application.routes(dataSource: DataSource, payments: PaymentService, reports: BalanceReport, ledger: LedgerEngine) {
+fun Application.routes(
+    dataSource: DataSource,
+    payments: PaymentService,
+    reports: BalanceReport,
+    ledger: LedgerEngine,
+    analytics: Analytics,
+) {
     routing {
         // Demo console, API docs and the OpenAPI spec (static files from src/main/resources/web).
         get("/") { call.respondRedirect("/ui/") }
@@ -57,15 +63,26 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
                         currency = req.currency,
                         taxRate = parseRate("taxRate", req.taxRate),
                         taxJurisdiction = req.taxJurisdiction,
-                        capturedAt = parseInstant("capturedAt", req.capturedAt),
+                        capturedAt = instant("capturedAt", req.capturedAt),
                     ),
                 )
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toDto())
             }
 
+            // Latest capture first; filters: merchantId, status (CAPTURED | PARTIALLY_REFUNDED | REFUNDED); offset pagination.
             get("/payments") {
-                val limit = parseLimit(call.request.queryParameters["limit"], default = 50)
-                call.respond(PaymentsResponse(payments.recent(limit).map { it.toDto() }))
+                val q = call.request.queryParameters
+                val status = q["status"]?.let { s ->
+                    PaymentStatus.entries.firstOrNull { it.name == s }
+                        ?: throw ValidationException("status must be one of ${PaymentStatus.entries.joinToString()}")
+                }
+                val (total, page) = payments.page(
+                    merchantId = q["merchantId"],
+                    status = status,
+                    limit = parseLimit(q["limit"], default = 50),
+                    offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE),
+                )
+                call.respond(PaymentsResponse(page.map { it.toDto() }, total))
             }
 
             get("/payments/{paymentId}") {
@@ -80,14 +97,14 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
                         paymentId = call.parameters["paymentId"]!!,
                         refundId = req.refundId,
                         amount = req.amount,
-                        refundedAt = parseInstant("refundedAt", req.refundedAt),
+                        refundedAt = instant("refundedAt", req.refundedAt),
                     ),
                 )
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toResponse())
             }
 
             get("/reports/balances") {
-                val asOf = parseInstant("asOf", call.request.queryParameters["asOf"])
+                val asOf = instant("asOf", call.request.queryParameters["asOf"])
                 val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
                 call.respond(reports.build(asOf, currency).toResponse())
             }
@@ -101,15 +118,9 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
                 val entries = dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
-        }
-    }
-}
 
-private fun parseInstant(field: String, value: String?): Instant? = value?.let {
-    try {
-        Instant.parse(it)
-    } catch (e: DateTimeParseException) {
-        throw ValidationException("$field must be an ISO-8601 UTC timestamp, e.g. 2026-10-14T10:00:00Z")
+            analyticsRoutes(analytics)
+        }
     }
 }
 

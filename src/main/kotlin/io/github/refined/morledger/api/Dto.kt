@@ -68,7 +68,7 @@ data class PaymentDto(
 data class RefundResponse(val refund: RefundDto, val payment: PaymentDto)
 
 @Serializable
-data class PaymentsResponse(val payments: List<PaymentDto>)
+data class PaymentsResponse(val payments: List<PaymentDto>, val total: Long)
 
 @Serializable
 data class TaxOwedDto(val jurisdiction: String, val currency: String, val amountOwed: Long)

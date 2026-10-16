@@ -9,6 +9,7 @@ import io.github.refined.morledger.ledger.PostgresLedger
 import io.github.refined.morledger.money.RefundFeePolicy
 import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.PricingSettings
+import io.github.refined.morledger.reports.Analytics
 import io.github.refined.morledger.reports.BalanceReport
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
@@ -85,5 +86,6 @@ fun Application.module(
         PaymentService(dataSource, pricing, clock, engine, ledger.hotAccountShards),
         BalanceReport(dataSource, engine),
         engine,
+        Analytics(dataSource, engine),
     )
 }
