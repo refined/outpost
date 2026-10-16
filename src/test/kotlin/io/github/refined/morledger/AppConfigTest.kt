@@ -17,6 +17,16 @@ class AppConfigTest {
         assertEquals("mor", config.dbUser)
         assertEquals("mor", config.dbPassword)
         assertEquals(PricingSettings(BigDecimal("0.05"), RefundFeePolicy.MOR_KEEPS_FEE), config.pricing)
+        assertEquals(LedgerSettings(BalanceMode.STORED, batchMaxSize = 100, batchMaxWaitMs = 0), config.ledger)
+    }
+
+    @Test
+    fun `batched mode is configured from the environment`() {
+        val config = AppConfig.fromEnv(mapOf("BALANCE_MODE" to "BATCHED", "BATCH_MAX_SIZE" to "10", "BATCH_MAX_WAIT_MS" to "2"))
+
+        assertEquals(LedgerSettings(BalanceMode.BATCHED, batchMaxSize = 10, batchMaxWaitMs = 2), config.ledger)
+        assertFailsWith<IllegalArgumentException> { AppConfig.fromEnv(mapOf("BATCH_MAX_SIZE" to "0")) }
+        assertFailsWith<IllegalArgumentException> { AppConfig.fromEnv(mapOf("BALANCE_MODE" to "SNAPSHOT")) }
     }
 
     @Test

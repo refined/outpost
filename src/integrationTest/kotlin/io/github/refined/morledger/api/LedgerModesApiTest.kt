@@ -1,16 +1,14 @@
 package io.github.refined.morledger.api
 
+import io.github.refined.morledger.BalanceMode
 import io.github.refined.morledger.LedgerSettings
 import io.github.refined.morledger.TestDatabase
-import io.github.refined.morledger.ledger.BalanceMode
 import io.ktor.client.HttpClient
 import io.ktor.http.HttpStatusCode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -29,7 +27,7 @@ class LedgerModesApiTest {
 
     private val variants = listOf(
         Variant("stored", LedgerSettings(balanceMode = BalanceMode.STORED)),
-        Variant("batched", LedgerSettings(balanceMode = BalanceMode.BATCHED, balanceRefreshMs = 20)),
+        Variant("batched", LedgerSettings(balanceMode = BalanceMode.BATCHED, batchMaxWaitMs = 5)),
     )
 
     /** 12 captures in two currencies and two merchants, then partial and full refunds. */
@@ -54,7 +52,6 @@ class LedgerModesApiTest {
             lateinit var result: Pair<JsonObject, JsonObject>
             api(ledger = v.settings) {
                 client.sampleFlow()
-                client.awaitSnapshotCaughtUp()
                 client.assertBooksBalance()
                 result = client.getJson("/v1/reports/balances") to client.getJson("/v1/reports/balances?asOf=${t0.plusSeconds(5_000)}")
             }
@@ -70,24 +67,25 @@ class LedgerModesApiTest {
     }
 
     @Test
-    fun `batched reads lag until a refresh`() {
-        val twoCaptures = 2 * 9_395L
-        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED, balanceRefreshMs = 0)) {
-            client.capture("p_1")
-            client.capture("p_2")
-            assertEquals(2, client.getJson("/v1/ledger/lag").long("pendingEntries"))
-            assertEquals(0, client.merchantBalance("m_1") ?: 0, "nothing folded in yet")
-        }
-        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED, balanceRefreshMs = 20)) {
-            client.awaitSnapshotCaughtUp()
-            assertEquals(twoCaptures, client.merchantBalance("m_1"))
+    fun `in a batch, failing requests are rolled back alone`() =
+        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED, batchMaxWaitMs = 50)) {
+            assertEquals(HttpStatusCode.Created, client.capture("p_0").status)
+            coroutineScope {
+                val good = (1..10).map { i -> async(Dispatchers.IO) { client.capture("p_$i").status } }
+                val conflict = async(Dispatchers.IO) { client.capture("p_0", amount = 1).status }
+                val tooMuch = async(Dispatchers.IO) { client.refund("p_0", "r_0", amount = 1_000_000).status }
+
+                assertEquals(List(10) { HttpStatusCode.Created }, good.awaitAll())
+                assertEquals(HttpStatusCode.Conflict, conflict.await())
+                assertEquals(HttpStatusCode.UnprocessableEntity, tooMuch.await())
+            }
+            assertEquals(11 * 9_395L, client.merchantBalance("m_1"))
             client.assertBooksBalance()
         }
-    }
 
     @Test
-    fun `refreshing while captures run concurrently loses nothing`() =
-        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED, balanceRefreshMs = 1)) {
+    fun `batched captures running concurrently lose nothing`() =
+        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED)) {
             coroutineScope {
                 (0 until 4).map { w ->
                     async(Dispatchers.IO) {
@@ -96,7 +94,6 @@ class LedgerModesApiTest {
                 }.awaitAll()
             }
 
-            client.awaitSnapshotCaughtUp()
             assertEquals(200 * 9_395L, client.merchantBalance("m_1"))
             client.assertBooksBalance()
         }
@@ -104,8 +101,4 @@ class LedgerModesApiTest {
     private suspend fun HttpClient.merchantBalance(merchantId: String): Long? =
         getJson("/v1/reports/balances").objects("merchants").singleOrNull { it.str("merchantId") == merchantId }?.long("balance")
 
-    /** No-op for STORED: its lag is always zero. */
-    private suspend fun HttpClient.awaitSnapshotCaughtUp() = withTimeout(10_000) {
-        while (getJson("/v1/ledger/lag").long("pendingEntries") > 0) delay(20)
-    }
 }

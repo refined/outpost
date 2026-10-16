@@ -3,8 +3,7 @@ package io.github.refined.morledger
 import io.github.refined.morledger.api.installErrorHandling
 import io.github.refined.morledger.api.routes
 import io.github.refined.morledger.db.Database
-import io.github.refined.morledger.db.transaction
-import io.github.refined.morledger.ledger.BalanceMode
+import io.github.refined.morledger.ledger.GroupCommitter
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.money.RefundFeePolicy
 import io.github.refined.morledger.payments.PaymentService
@@ -22,8 +21,6 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import kotlinx.serialization.json.Json
 import java.math.BigDecimal
 import java.time.Clock
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import javax.sql.DataSource
 
 data class AppConfig(
@@ -48,18 +45,26 @@ data class AppConfig(
             ),
             ledger = LedgerSettings(
                 balanceMode = BalanceMode.valueOf(env["BALANCE_MODE"] ?: BalanceMode.STORED.name),
-                balanceRefreshMs = (env["BALANCE_REFRESH_MS"] ?: "1000").toLong().also {
-                    require(it >= 0) { "BALANCE_REFRESH_MS must be >= 0" }
-                },
+                batchMaxSize = (env["BATCH_MAX_SIZE"] ?: "100").toInt().also { require(it in 1..10_000) { "BATCH_MAX_SIZE must be in [1, 10000]" } },
+                batchMaxWaitMs = (env["BATCH_MAX_WAIT_MS"] ?: "0").toLong().also { require(it in 0..1_000) { "BATCH_MAX_WAIT_MS must be in [0, 1000]" } },
             ),
         )
     }
 }
 
+enum class BalanceMode { STORED, BATCHED }
+
 data class LedgerSettings(
     val balanceMode: BalanceMode = BalanceMode.STORED,
-    val balanceRefreshMs: Long = 1000,
-)
+    val batchMaxSize: Int = 100,
+    val batchMaxWaitMs: Long = 0,
+) {
+    val description: String
+        get() = when (balanceMode) {
+            BalanceMode.STORED -> "postgres (balances: stored)"
+            BalanceMode.BATCHED -> "postgres (balances: batched, up to $batchMaxSize per commit)"
+        }
+}
 
 fun main() {
     val config = AppConfig.fromEnv()
@@ -68,36 +73,34 @@ fun main() {
     embeddedServer(Netty, port = config.port) { module(dataSource, config.pricing, settings = config.ledger) }.start(wait = true)
 }
 
-private fun Application.startBalanceRefresher(dataSource: DataSource, ledger: Ledger, periodMs: Long) {
-    val scheduler = Executors.newSingleThreadScheduledExecutor { Thread(it, "balance-refresher").apply { isDaemon = true } }
-    scheduler.scheduleWithFixedDelay({
-        try {
-            dataSource.transaction { ledger.refreshBalances(it) }
-        } catch (e: Exception) {
-            log.warn("Balance refresh failed; retrying next tick", e)
-        }
-    }, periodMs, periodMs, TimeUnit.MILLISECONDS)
-    monitor.subscribe(ApplicationStopped) { scheduler.shutdownNow() }
-}
-
 fun Application.module(
     dataSource: DataSource,
     pricing: PricingSettings = PricingSettings(),
     clock: Clock = Clock.systemUTC(),
     settings: LedgerSettings = LedgerSettings(),
 ) {
-    val ledger = Ledger(settings.balanceMode)
-    log.info("Ledger: {}", ledger.description)
-    if (ledger.refreshesBalances && settings.balanceRefreshMs > 0) startBalanceRefresher(dataSource, ledger, settings.balanceRefreshMs)
+    val ledger = Ledger()
+    val committer = if (settings.balanceMode == BalanceMode.BATCHED) {
+        GroupCommitter(dataSource, ledger, settings.batchMaxSize, settings.batchMaxWaitMs).also { committer ->
+            monitor.subscribe(ApplicationStopped) {
+                log.info("Group commit: {} items in {} batches", committer.items, committer.batches)
+                committer.close()
+            }
+        }
+    } else {
+        null
+    }
+    log.info("Ledger: {}", settings.description)
     install(ContentNegotiation) {
         json(Json { ignoreUnknownKeys = false })
     }
     installErrorHandling()
     routes(
         dataSource,
-        PaymentService(dataSource, pricing, clock, ledger),
+        PaymentService(dataSource, pricing, clock, ledger, committer),
         BalanceReport(dataSource, ledger),
         ledger,
+        settings.description,
         Analytics(dataSource, ledger),
     )
 }

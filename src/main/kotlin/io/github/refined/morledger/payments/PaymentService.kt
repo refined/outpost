@@ -3,11 +3,13 @@ package io.github.refined.morledger.payments
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
+import io.github.refined.morledger.ledger.GroupCommitter
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.ledger.NewJournalEntry
 import io.github.refined.morledger.money.Allocation
 import java.math.BigDecimal
 import java.security.MessageDigest
+import java.sql.Connection
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -20,6 +22,7 @@ class PaymentService(
     private val pricing: PricingSettings = PricingSettings(),
     private val clock: Clock = Clock.systemUTC(),
     private val ledger: Ledger = Ledger(),
+    private val committer: GroupCommitter? = null,
 ) {
     fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
         validateId("paymentId", cmd.paymentId)
@@ -52,7 +55,7 @@ class PaymentService(
             recordedAt = capturedAt, // placeholder; the stored value comes from the database
         )
 
-        return dataSource.transaction { conn ->
+        return write { conn, deltas ->
             val created = PaymentRepository.insertPayment(conn, payment, fingerprint)
             if (created) {
                 ledger.post(
@@ -64,6 +67,7 @@ class PaymentService(
                         effectiveAt = capturedAt,
                         postings = ChartOfAccounts.capture(currency, jurisdiction, payment.merchantId, split),
                     ),
+                    deltas,
                 )
             } else {
                 val existing = PaymentRepository.findPayment(conn, cmd.paymentId)!!
@@ -85,13 +89,13 @@ class PaymentService(
         val refundedAt = validateEventTime("refundedAt", cmd.refundedAt)
         val fingerprint = fingerprint("refund", cmd.paymentId, cmd.refundId, cmd.amount, cmd.refundedAt?.let { refundedAt })
 
-        return dataSource.transaction { conn ->
+        return write { conn, deltas ->
             // Lock first: concurrent refunds of the same payment queue up here and see each other's results.
             val payment = PaymentRepository.findPayment(conn, cmd.paymentId, forUpdate = true)?.value
                 ?: throw NotFoundException("payment_not_found", "payment ${cmd.paymentId} has not been captured")
 
             PaymentRepository.findRefund(conn, cmd.refundId)?.let { existing ->
-                return@transaction replayRefund(conn, existing, fingerprint)
+                return@write replayRefund(conn, existing, fingerprint)
             }
 
             if (refundedAt.isBefore(payment.capturedAt)) {
@@ -124,6 +128,7 @@ class PaymentService(
                     effectiveAt = refundedAt,
                     postings = ChartOfAccounts.refund(payment.currency, payment.taxJurisdiction, payment.merchantId, refund.split),
                 ),
+                deltas,
             )
             val after = PaymentRepository.details(conn, payment.paymentId)!!
             Recorded(RefundResult(after.refunds.single { it.refundId == refund.refundId }, after), created = true)
@@ -137,7 +142,10 @@ class PaymentService(
         dataSource.transaction { PaymentRepository.details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")
 
-    private fun replayRefund(conn: java.sql.Connection, existing: Stored<Refund>, fingerprint: String): Recorded<RefundResult> {
+    private fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
+        if (committer != null) committer.submit(block) else dataSource.transaction { block(it, null) }
+
+    private fun replayRefund(conn: Connection, existing: Stored<Refund>, fingerprint: String): Recorded<RefundResult> {
         if (existing.fingerprint != fingerprint) {
             throw ConflictException("idempotency_conflict", "refund ${existing.value.refundId} was already recorded with a different payload")
         }

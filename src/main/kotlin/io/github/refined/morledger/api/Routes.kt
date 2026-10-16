@@ -43,14 +43,13 @@ data class MismatchDto(val code: String, val currency: String, val stored: Long,
 @Serializable
 data class VerifyResponse(val ok: Boolean, val mismatches: List<MismatchDto>)
 
-@Serializable
-data class LagResponse(val pendingEntries: Long, val readLagMs: Long, val refreshedAt: String?)
 
 fun Application.routes(
     dataSource: DataSource,
     payments: PaymentService,
     reports: BalanceReport,
     ledger: Ledger,
+    ledgerDescription: String,
     analytics: Analytics,
 ) {
     routing {
@@ -64,7 +63,7 @@ fun Application.routes(
 
         get("/health") {
             dataSource.transaction { conn -> conn.createStatement().use { it.execute("SELECT 1") } }
-            call.respond(HealthResponse("ok", ledger.description))
+            call.respond(HealthResponse("ok", ledgerDescription))
         }
 
         route("/v1") {
@@ -140,11 +139,6 @@ fun Application.routes(
             get("/ledger/verify") {
                 val mismatches = dataSource.transaction { ledger.verify(it) }
                 call.respond(VerifyResponse(mismatches.isEmpty(), mismatches.map { MismatchDto(it.account.code, it.account.currency, it.stored, it.fromPostings) }))
-            }
-
-            get("/ledger/lag") {
-                val lag = dataSource.transaction { ledger.lag(it) }
-                call.respond(LagResponse(lag.pendingEntries, lag.readLagMs, lag.refreshedAt?.toString()))
             }
 
             analyticsRoutes(analytics)

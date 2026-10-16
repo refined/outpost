@@ -19,24 +19,10 @@ CREATE TABLE ledger.journal_entries (
     payment_id   TEXT        NOT NULL,
     refund_id    TEXT,
     effective_at TIMESTAMPTZ NOT NULL,             -- event time; asOf reports filter on it
-    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Entry ids are not in commit order, so snapshots cut by xid: all xids below pg_snapshot_xmin have finished.
-    txid         XID8        NOT NULL DEFAULT pg_current_xact_id()
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX journal_entries_payment_idx ON ledger.journal_entries (payment_id);
 CREATE INDEX journal_entries_effective_idx ON ledger.journal_entries (effective_at);
-CREATE INDEX journal_entries_txid_idx ON ledger.journal_entries (txid);
-
-CREATE TABLE ledger.balance_snapshots (
-    account_id BIGINT PRIMARY KEY REFERENCES ledger.accounts (id),
-    balance    BIGINT NOT NULL
-);
-CREATE TABLE ledger.snapshot_state (
-    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-    boundary     XID8        NOT NULL,             -- entries with txid < boundary are in the snapshot
-    refreshed_at TIMESTAMPTZ NOT NULL
-);
-INSERT INTO ledger.snapshot_state (boundary, refreshed_at) VALUES ('0', now());
 
 CREATE TABLE ledger.postings (
     id         BIGSERIAL PRIMARY KEY,

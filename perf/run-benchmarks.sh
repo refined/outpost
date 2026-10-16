@@ -2,8 +2,8 @@
 # Benchmarks the balance modes under the same budget: 2 CPUs and 3 GB for app + Postgres. k6 runs outside the limit.
 # Results: perf/results/<timestamp>/summary.md. The six-variant comparison in docs/performance.md ran at commit 0ffcf3f.
 #
-#   perf/run-benchmarks.sh             # both variants
-#   perf/run-benchmarks.sh pg-batched  # one of them
+#   perf/run-benchmarks.sh                 # all variants
+#   perf/run-benchmarks.sh pg-batched-100  # one of them
 #
 # Needs only Docker and bash (Git Bash on Windows). Each variant starts from empty volumes.
 set -euo pipefail
@@ -14,19 +14,35 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
 COMPOSE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
-RATES=(200 250 300 350 400 500 600 800 1000)
-STEP=20s
+RATES=(200 250 300 350 400 500 600 800 1000 1300 1600)
+STEP_SECONDS=20
 
 LIMITS="APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB"
 variant_env() {
   case "$1" in
-    pg-stored)  echo "BALANCE_MODE=STORED $LIMITS" ;;
-    pg-batched) echo "BALANCE_MODE=BATCHED BALANCE_REFRESH_MS=1000 $LIMITS" ;;
+    pg-stored)      echo "BALANCE_MODE=STORED $LIMITS" ;;
+    pg-batched-10)  echo "BALANCE_MODE=BATCHED BATCH_MAX_SIZE=10 BATCH_MAX_WAIT_MS=0 $LIMITS" ;;
+    pg-batched-100) echo "BALANCE_MODE=BATCHED BATCH_MAX_SIZE=100 BATCH_MAX_WAIT_MS=0 $LIMITS" ;;
     *) echo "unknown variant $1" >&2; exit 1 ;;
   esac
 }
 
 k6() { "${COMPOSE[@]}" run --rm --no-deps -e VARIANT="$VARIANT" "$@" k6 run --quiet "${SCRIPT}" 2>&1 | grep -E "^(local|pg-|seed:)" || true; }
+
+# Samples pg_stat_activity 5 times a second for one step: "active,waiting on a lock,waiting on IO" per line.
+# psql ends by itself after the step (\watch c=N), so nothing is left running in the container.
+sample_waits() {
+  "${COMPOSE[@]}" exec -T postgres psql -U mor -d mor_ledger -At -F, > "$1" 2>/dev/null <<SQL || true
+SELECT count(*) FILTER (WHERE state = 'active'),
+       count(*) FILTER (WHERE state = 'active' AND wait_event_type = 'Lock'),
+       count(*) FILTER (WHERE state = 'active' AND wait_event_type = 'IO')
+FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()
+\watch i=0.2 c=$((STEP_SECONDS * 5))
+SQL
+}
+
+# Share of active backend samples that were waiting: column 2 = row locks, column 3 = IO (mostly WAL flush on commit).
+wait_share() { awk -F, -v col="$2" '/^[0-9]+,[0-9]+,[0-9]+$/ { a += $1; w += $col } END { printf "%d%%", (a ? 100 * w / a : 0) }' "$1" 2>/dev/null || echo "?"; }
 
 reset_stack() {
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
@@ -53,13 +69,14 @@ run_variant() {
   # Throughput ladders: raise the arrival rate until a step no longer holds (keeps up, p95 < 250 ms, < 1% errors).
   for scenario in capture hot mixed; do
     for rate in "${RATES[@]}"; do
-      SCRIPT=bench.js k6 -e SCENARIO=$scenario -e RATE="$rate" -e DURATION=$STEP -e OUT="$STAMP/$VARIANT-$scenario-$rate" -e RUN="$scenario$rate"
+      sample_waits "$OUTDIR/$VARIANT-$scenario-$rate.waits" &
+      SCRIPT=bench.js k6 -e SCENARIO=$scenario -e RATE="$rate" -e DURATION=${STEP_SECONDS}s -e OUT="$STAMP/$VARIANT-$scenario-$rate" -e RUN="$scenario$rate"
+      wait
       grep -q '"holds":true' "$OUTDIR/$VARIANT-$scenario-$rate.json" 2>/dev/null || break
     done
   done
 
-  # The books must still balance after all of it (a batched snapshot first catches up).
-  sleep 3
+  # The books must still balance after all of it.
   {
     echo "{\"variant\":\"$VARIANT\",\"verify\":$(curl -s http://127.0.0.1:8090/v1/ledger/verify),"
     echo "\"integrity\":$(curl -s http://127.0.0.1:8090/v1/reports/balances | grep -o '"integrity":{[^}]*}' | sed 's/"integrity"://'),"
@@ -80,13 +97,17 @@ summarise() {
     echo
     echo "## Highest holding rate per scenario (keeps up, p95 < 250 ms, errors < 1%)"
     echo
+    echo "Lock / IO: share of active Postgres backends waiting on a row lock / on IO at that step."
+    echo
     echo "| Variant | capture (100 merchants) | hot (1 merchant) | mixed (85/10/5) |"
     echo "|---|---|---|---|"
     for v in "$@"; do
       row="| $v |"
       for s in capture hot mixed; do
-        best=""; for f in "$OUTDIR"/"$v"-"$s"-*.json; do [ -f "$f" ] || continue
-          if grep -q '"holds":true' "$f"; then best="$(field "$f" achievedRps)/s (p95 $(field "$f" p95) ms)"; fi; done
+        best=""; for r in "${RATES[@]}"; do f="$OUTDIR/$v-$s-$r.json"; [ -f "$f" ] || continue
+          if grep -q '"holds":true' "$f"; then
+            best="$(field "$f" achievedRps)/s (p95 $(field "$f" p95) ms; lock $(wait_share "${f%.json}.waits" 2), IO $(wait_share "${f%.json}.waits" 3))"
+          fi; done
         row="$row ${best:-none} |"
       done
       echo "$row"
@@ -100,24 +121,12 @@ summarise() {
       echo "| $v | $(field "$OUTDIR/$v-seed-100k.json" paymentsPerSecond) | $(field "$OUTDIR/$v-report-10k.json" p50) / $(field "$OUTDIR/$v-report-10k.json" p95) ms | $(field "$OUTDIR/$v-report-100k.json" p50) / $(field "$OUTDIR/$v-report-100k.json" p95) ms |"
     done
     echo
-    echo "## Freshness: how stale a balance read was, worst step per variant"
-    echo
-    echo "| Variant | read lag max | entries waiting for the snapshot, max |"
-    echo "|---|---|---|"
-    for v in "$@"; do
-      lag=0; pend=0
-      for f in "$OUTDIR"/"$v"-capture-*.json "$OUTDIR"/"$v"-hot-*.json "$OUTDIR"/"$v"-mixed-*.json; do [ -f "$f" ] || continue
-        l=$(field "$f" readLagMax); p=$(field "$f" pendingMax)
-        [ "${l:-0}" -gt "$lag" ] && lag=$l; [ "${p:-0}" -gt "$pend" ] && pend=$p; done
-      echo "| $v | $lag ms | $pend |"
-    done
-    echo
     echo "## All steps"
     echo
-    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Read lag p95 / max | Pending max | Holds |"
+    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Lock wait | IO wait | Holds |"
     echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
     for v in "$@"; do for s in capture hot mixed; do for r in "${RATES[@]}"; do f="$OUTDIR/$v-$s-$r.json"; [ -f "$f" ] || continue
-      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(field "$f" readLagP95) / $(field "$f" readLagMax) ms | $(field "$f" pendingMax) | $(field "$f" holds) |"
+      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(wait_share "${f%.json}.waits" 2) | $(wait_share "${f%.json}.waits" 3) | $(field "$f" holds) |"
     done; done; done
     echo
     echo "## Consistency after each run"
@@ -128,7 +137,7 @@ summarise() {
 }
 
 VARIANTS=("$@")
-[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-batched)
+[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-batched-10 pg-batched-100)
 for v in "${VARIANTS[@]}"; do run_variant "$v"; done
 summarise "${VARIANTS[@]}"
 "${COMPOSE[@]}" down >/dev/null 2>&1 || true
