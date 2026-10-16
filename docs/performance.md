@@ -1,58 +1,99 @@
 # Performance: ledger variants under one budget
 
-How fast can the service take captures and refunds, and does the way balances are kept change that? Six ledger variants ran on the same code, data and resource budget. Two remain in the code (`STORED`, the default, and `BATCHED`); the other four were removed after the measurement. To rerun them, check out commit `0ffcf3f`.
+How fast can the service take captures and refunds, and does the way balances are kept change that? Everything below ran on the same code, data and resource budget, in two rounds:
+
+1. **Round 2:** the two modes in the code, `STORED` (default) and `BATCHED` (group commit), with lock and IO waits sampled from Postgres.
+2. **Round 1:** six earlier variants. Four were removed afterwards; their code is at commit `0ffcf3f`.
 
 ## Setup
 
-- **Budget:** 2 CPUs and 3 GB for the whole system under test, set with Docker limits ([`perf/compose.limits.yml`](../perf/compose.limits.yml)). The load generator runs outside the limit.
-
-  | Variants | app | Postgres | TigerBeetle |
-  |---|---|---|---|
-  | Postgres variants | 1.0 CPU / 1280 MB | 1.0 CPU / 1792 MB (`shared_buffers` 448 MB) | — |
-  | TigerBeetle | 0.8 CPU / 384 MB | 0.4 CPU / 256 MB | 0.8 CPU / 2432 MB |
-
-  TigerBeetle allocates ~2.3 GB at start-up, so its variant had to squeeze the app and Postgres.
-- **Host:** Docker Desktop 29.1.3 on Windows 11, a 16-CPU / 16 GB VM. Containers from other projects were running at the same time. The limits keep them from taking our CPUs, but not from sharing caches and memory bandwidth. Treat differences under ~50 rps as noise: an earlier run of the same harness put `STORED`'s capture limit between 200 and 400 rps, this one at 400.
+- **Budget:** 2 CPUs and 3 GB for the whole system under test, set with Docker limits ([`perf/compose.limits.yml`](../perf/compose.limits.yml)): app 1.0 CPU / 1280 MB, Postgres 1.0 CPU / 1792 MB (`shared_buffers` 448 MB). A limit is a CPU-time quota (cgroups), not pinned cores. The load generator runs outside the limit.
+- **Host:** Docker Desktop 29.1.3 on Windows 11, a 16-CPU / 16 GB VM.
+  - **Round 2** ran with no other containers.
+  - **Round 1** ran next to other projects' containers.
+  - Treat differences under ~50 rps as noise. `STORED`'s capture limit came out at 200–400, 400 and 300 rps in three runs.
 - **Load:** [k6](https://grafana.com/docs/k6/) 2.3.0 ([`perf/k6/bench.js`](../perf/k6/bench.js)), driven by [`perf/run-benchmarks.sh`](../perf/run-benchmarks.sh). Each variant starts from empty volumes.
 
 ## Method
 
 1. **Warm-up:** 15 s at 200 rps, not reported.
-2. **Preload and report latency:** seed 10k payments, then measure `GET /v1/reports/balances` at 20 rps. Seed up to 100k payments and measure again. The seed's throughput doubles as a bulk-ingest number.
+2. **Preload and report latency:** seed 10k payments, then measure `GET /v1/reports/balances` at 20 rps; seed up to 100k payments and measure again. The seed is closed-loop (24 virtual users), so its throughput doubles as a bulk-ingest number.
 3. **Throughput ladders:** a constant arrival rate (open loop) of 200, 250, 300, 350, 400, 500… rps, 20 s per step, until a step fails. A step **holds** if it keeps up with the target (≥ 95%), with p95 < 250 ms and < 1% errors. There are three scenarios:
    - `capture`: payments spread over 100 merchants and 3 currencies;
    - `hot`: every payment to one merchant in one jurisdiction, the worst case for shared rows;
    - `mixed`: 85% captures, 10% partial refunds, 5% balance reports.
-4. **Freshness:** during every step, a second k6 scenario polls `/v1/ledger/lag` twice a second. It records how stale a balance read is and how many entries wait for the next snapshot refresh. Its requests are excluded from the step's numbers.
-5. **Consistency:** after each variant, `/v1/ledger/verify` and the report's integrity check must pass, and every merchant must reconcile. All six did.
+4. **Waits (round 2):** during every step, `pg_stat_activity` is sampled every 200 ms. The result is the share of active Postgres backends waiting on a row lock, and on IO (mostly the WAL flush at commit).
+5. **Consistency:** after each variant, `/v1/ledger/verify` and the report's integrity check must pass, and every merchant must reconcile. All variants in both rounds did.
 
-**Why k6 and not Kotlin?** k6 is a load generator with a Go engine; only the scenarios are JavaScript. It runs from one Docker image with no build step, and its arrival-rate executor starts requests on schedule even when the service slows down, so latency is not hidden by coordinated omission. The Kotlin-native equivalent is Gatling (Java/Kotlin DSL, Gradle plugin). A home-made loop on coroutines would measure the wrong thing.
+**Why k6 and not Kotlin?**
+- k6 is a load generator with a Go engine; only the scenarios are JavaScript.
+- It runs from one Docker image with no build step.
+- Its arrival-rate executor starts requests on schedule even when the service slows down, so latency is not hidden by coordinated omission.
+- The Kotlin-native equivalent is Gatling (Java/Kotlin DSL, Gradle plugin). A home-made loop on coroutines would measure the wrong thing.
 
-## The variants
+## Round 2: stored balances vs group commit
+
+Run `20261016-214831`, no other containers on the host.
+
+| Variant | How a capture is written |
+|---|---|
+| `pg-stored` | One transaction per request: business row, journal entry, an `UPDATE balance` on each of its 4 accounts, a commit |
+| `pg-batched-10` / `pg-batched-100` | Group commit: one writer runs up to 10 / 100 queued requests in one transaction. Every request writes its own rows, entry and postings; each account gets one `UPDATE` with the batch's summed delta, and there is one commit per batch |
+
+**Highest holding rate** (lock / IO = share of active Postgres backends waiting on a row lock / on IO at that step):
+
+| Variant | capture (100 merchants) | hot (1 merchant) | mixed (85/10/5) |
+|---|---|---|---|
+| pg-stored | 299/s (p95 213 ms; lock 0%, IO 52%) | 299/s (p95 198 ms; lock 0%, IO 43%) | 300/s (p95 27 ms; lock 0%, IO 6%) |
+| pg-batched-10 | 250/s (p95 120 ms; lock 0%, IO 13%) | 250/s (p95 171 ms; lock 0%, IO 57%) | 200/s (p95 6 ms; lock 0%, IO 3%) |
+| pg-batched-100 | **400/s** (p95 147 ms; lock 0%, IO 41%) | **400/s** (p95 52 ms; lock 0%, IO 66%) | **400/s** (p95 59 ms; lock 0%, IO 40%) |
+
+**Bulk ingest and report latency:**
+
+| Variant | seed: payments/s | report p50 / p95 @ 10k payments | report p50 / p95 @ 100k payments |
+|---|---|---|---|
+| pg-stored | 271 | 2 / 2 ms | 2 / 2 ms |
+| pg-batched-10 | 262 | 2 / 3 ms | 2 / 2 ms |
+| pg-batched-100 | 314 | 2 / 3 ms | 2 / 2 ms |
+
+**What it shows:**
+- **Row locks are never the bottleneck.** Lock waits were 0% in every step of every variant, including every payment on one merchant at saturation. That is why splitting hot accounts (round 1) could not help.
+- **Postgres is mostly idle.** Even at saturation, `STORED` had 0.3–0.9 active Postgres backends on average. The time it does spend is largely IO: the WAL flush at commit, 30–50% of active samples near the limit. The rest of the time goes into the app: HTTP, JSON, JDBC round trips on 1 CPU.
+- **Group commit with large batches lifts the ceiling by about a third:** 300 → 400 rps in every scenario, and 271 → 314 payments/s in bulk ingest. It saves exactly that commit and balance-update work: 100 requests share one commit and four balance `UPDATE`s instead of 100 and 400.
+- **Small batches lose.** A single writer runs every request's statements one after another on one connection; `STORED` spreads them over the pool. With batches of 10, the commits saved do not pay for that lost parallelism; with 100, they do.
+- **Under light load nothing changes.** A batch takes only what is already queued (`BATCH_MAX_WAIT_MS=0`), so at low rates batches hold one request and latency is the same as `STORED`.
+
+**What would lift it further:**
+- **Batch the SQL itself, not only the commit:** one multi-row `INSERT` per table per batch instead of ~8 statements per request. This is what TigerBeetle does natively.
+- **Give the app more of the budget:** the database is underused.
+
+Neither is needed at this service's scale.
+
+## Round 1: six variants (history)
+
+Run `20261016-150625`, with other projects' containers running.
 
 | Variant | On capture / refund | Current-balance read | Fresh? |
 |---|---|---|---|
 | `pg-stored` | Postings, plus `UPDATE accounts SET balance = balance + x` on each account (row lock until commit) | Read the column | Exact |
 | `pg-computed` | Postings only | `SUM` over all postings | Exact |
 | `pg-snapshot` | Postings only | Snapshot + `SUM` of the postings since the last refresh | Exact |
-| `pg-batched` | Postings only | Snapshot only, refreshed every 1 s | Stale by up to one refresh |
+| `pg-snapshot-only` | Postings only | Snapshot only, refreshed every 1 s | Stale by up to one refresh |
 | `pg-sharded` | Like stored, with clearing, fee and tax accounts split into 8 sub-accounts | Folded back in the report | Exact |
 | `tigerbeetle` | Business rows in Postgres, transfers in TigerBeetle (dual write) | `lookupAccounts` | Exact |
 
-## Results
+`pg-snapshot-only` was called `pg-batched` in that run. Nothing was batched; the name now belongs to group commit.
 
-Run `20261016-150625`.
-
-**Highest holding rate** (keeps up, p95 < 250 ms, errors < 1%):
+**Highest holding rate:**
 
 | Variant | capture (100 merchants) | hot (1 merchant) | mixed (85/10/5) |
 |---|---|---|---|
 | pg-stored | 400/s (p95 23 ms) | 400/s (p95 8 ms) | 498/s (p95 161 ms) |
 | pg-computed | 350/s (p95 25 ms) | 350/s (p95 46 ms) | none |
 | pg-snapshot | 399/s (p95 223 ms) | 349/s (p95 221 ms) | 200/s (p95 35 ms) |
-| pg-batched | 350/s (p95 15 ms) | 350/s (p95 44 ms) | 350/s (p95 65 ms) |
+| pg-snapshot-only | 350/s (p95 15 ms) | 350/s (p95 44 ms) | 350/s (p95 65 ms) |
 | pg-sharded | 350/s (p95 74 ms) | 350/s (p95 122 ms) | 300/s (p95 33 ms) |
-| tigerbeetle | none | none | none |
+| tigerbeetle | none (see below) | none | none |
 
 **Bulk ingest and report latency:**
 
@@ -61,39 +102,37 @@ Run `20261016-150625`.
 | pg-stored | 336 | 2 / 3 ms | 2 / 2 ms |
 | pg-computed | 366 | 16 / 19 ms | 5489 / 9613 ms |
 | pg-snapshot | 368 | 2 / 4 ms | 9 / 10 ms |
-| pg-batched | 361 | 3 / 4 ms | 2 / 3 ms |
+| pg-snapshot-only | 361 | 3 / 4 ms | 2 / 3 ms |
 | pg-sharded | 323 | 2 / 3 ms | 2 / 3 ms |
 | tigerbeetle | 233 | 6 / 11 ms | 7 / 22 ms |
 
-**Freshness** (worst step):
+Snapshot-only reads were up to 1004 ms stale, with up to 361 entries waiting for the next refresh.
 
-| Variant | read lag max | entries waiting for the snapshot, max |
-|---|---|---|
-| pg-snapshot | 0 ms (reads add the tail) | 394 |
-| pg-batched | 1004 ms | 361 |
-| all others | 0 ms | 0 |
+**What it showed:**
+- **`COMPUTED` fails on reads.** The report grows with history (5–10 s at 100k payments); with 5% reports in the mix it does not hold even 200 rps.
+- **Snapshot + tail keeps reads exact but pays on every read.** It sums a few hundred tail entries per report, which halved the holding rate under the mixed load.
+- **Snapshot-only reads are cheap but stale, and writes get no cheaper:** each request still commits on its own.
+- **The sharding test was uninformative.**
+  - Only clearing, fee and tax were split; the hot merchant's own `merchant_payable` row was not, so the `hot` scenario still had one shared row per payment.
+  - More importantly, round 2's lock sampling shows there was no lock contention to remove.
+  - Sharding belongs to a system that has measured lock waits.
 
-TigerBeetle's steps, all at 200 rps:
-- capture achieved 22 rps, with p95 152 s;
-- hot achieved 190 rps, with p95 874 ms;
-- mixed achieved 193 rps, with p95 492 ms.
+**TigerBeetle** was measured twice, with the same TigerBeetle split of the budget (app 0.8 CPU / 384 MB, Postgres 0.4 CPU / 256 MB, TigerBeetle 0.8 CPU / 2432 MB):
 
-## What it means
+| Run | capture | hot | mixed | seed | report @ 100k |
+|---|---|---|---|---|---|
+| `20261016-110258` | 200/s held (p95 8 ms) | 200/s held (p95 15 ms) | 200/s held (p95 54 ms) | 266/s | 6 / 8 ms |
+| `20261016-150625` | stalled: 22/s, p95 152 s | 190/s, p95 874 ms | 193/s, p95 492 ms | 233/s | 7 / 22 ms |
 
-- **The limit is CPU per request, not balance locks.** Every Postgres variant tops out at 350–500 rps on 2 CPUs, within noise of each other, including on a single hot merchant. Taking the balance `UPDATE` out of the write path (computed, snapshot, batched) or spreading it over sub-accounts (sharded) buys nothing at this size. Each request spends its time in HTTP, JSON, the idempotency fingerprint and 6–8 statements, not waiting for a row lock. A hot-account row lock is held for about the length of a commit (~1–2 ms), so it serialises somewhere around 500–1000 entries/s per account. That is above what 2 CPUs can feed.
-- **`COMPUTED` fails on reads.** The report grows with history: 5–10 s at 100k payments. With 5% reports in the mix, it does not hold even 200 rps.
-- **`SNAPSHOT` keeps reads exact but pays on every read.** Each report sums the tail since the last refresh, a few hundred entries. That is cheap for one report, but under a mixed load it halved the holding rate.
-- **`BATCHED` makes reads constant-cost and lock-free, at the price of staleness:** a balance read is up to one refresh old (≤ 1 s here). That is fine for reports and dashboards. It is not fine for decisions that need the balance at that moment, such as payout or refund limits. For those, the write path still has the exact ledger, and an exact check can read the snapshot plus the tail.
-- **Sharding hot accounts adds rows and work without removing a bottleneck we have.** It belongs to a system that has measured hot-row contention.
-- **TigerBeetle lost here because of the budget, not its engine.** Its static memory left the app and Postgres 0.7 GB and 1.2 CPUs between them. The service still writes the business record and its idempotency row to Postgres, so every request became a dual write: Postgres and a network round trip to TigerBeetle. The 152 s p95 on capture is that starved stack falling behind, not a TigerBeetle limit. On dedicated hardware, at thousands of transfers per second on a few accounts, the picture would differ (see [ledger-comparison.md](ledger-comparison.md)).
+Both runs failed at 400 rps. The second run's capture result is a stall, not a throughput limit: the app had 384 MB for the JVM and Postgres 0.4 CPU, because TigerBeetle allocates ~2.3 GB at start-up. On top of that, every request was a dual write: the business row and idempotency record in Postgres, plus a network round trip to TigerBeetle. Under this budget TigerBeetle cannot show what it is built for (thousands of transfers per second on a few accounts); see [ledger-comparison.md](ledger-comparison.md).
 
 ## What we kept
 
-- **`STORED`** (default): exact, the fastest overall, constant-cost reads.
-- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BALANCE_REFRESH_MS`): the documented next step if writes ever contend on hot accounts or reads get heavy. `/v1/ledger/lag` reports its staleness.
+- **`STORED`** (default): one transaction per request; simple and exact. Its ceiling here is the app's CPU and the per-request commit, not locks.
+- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BATCH_MAX_SIZE`, `BATCH_MAX_WAIT_MS`): group commit, still exact and synchronous; +33% throughput at batch size 100 on this budget.
 
 To reproduce:
 
 ```bash
-perf/run-benchmarks.sh                       # pg-stored and pg-batched; results in perf/results/<time>/summary.md
+perf/run-benchmarks.sh                       # pg-stored, pg-batched-10, pg-batched-100 (~75 min); perf/results/<time>/summary.md
 ```

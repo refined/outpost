@@ -43,21 +43,26 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 ## Balance modes
 
-`BALANCE_MODE` decides how current balances are kept. It never changes a number: a test runs the same money flow through both modes and compares the reports. `asOf` reports always sum the postings.
+`BALANCE_MODE` decides how captures and refunds are written. Balances are exact in both modes, and a test runs the same money flow through both and compares the reports.
 
-| Mode | On posting | On a current-balance read | Fresh? |
+| Mode | Per request | Commits | Balance updates |
 |---|---|---|---|
-| `STORED` (default) | `UPDATE accounts SET balance = balance + x` on each account: a row lock held until commit | Read the column | Exact |
-| `BATCHED` | Nothing beyond the postings | Read the snapshot | Stale by up to one refresh (`BALANCE_REFRESH_MS`, 1 s) |
+| `STORED` (default) | One transaction: business row, journal entry, `UPDATE accounts SET balance = balance + x` on each account | One per request | One per account per request; the row lock is held until commit |
+| `BATCHED` | Queued; one writer thread runs a batch of up to `BATCH_MAX_SIZE` requests in one transaction | One per batch | One per account per batch, with the summed delta |
 
-Four more variants were measured and removed: balances summed on read, snapshot + tail, hot accounts split into sub-accounts, and TigerBeetle. Why, with the numbers: [performance.md](performance.md).
+**Group commit** ([`ledger/GroupCommitter.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/GroupCommitter.kt)):
+- **Validation runs outside.** Parsing, validation, the fingerprint and the split run on the request thread, in parallel. Only the database work is queued.
+- **The batch fills by itself under load.** The writer takes the first queued request plus whatever else is waiting, up to `BATCH_MAX_SIZE`, or keeps waiting up to `BATCH_MAX_WAIT_MS` (default 0: no artificial delay). At low load a batch holds one request, so latency is unchanged; near saturation batches grow and commits get rarer.
+- **One request fails alone.** Each request runs under its own `SAVEPOINT`. A refused refund or an idempotency conflict rolls back to it and answers with its error; the rest of the batch commits. Its balance changes are merged into the batch only on success.
+- **Each request is answered after its batch has committed**, so a 201 means the money is durably booked, as in `STORED`.
+- **If the commit itself fails,** each request in the batch is retried in its own transaction, so one bad request cannot fail its neighbours.
+- **What it costs:** one writer means one connection's worth of database work at a time. Idempotency and refund locking are unchanged: a duplicate `paymentId` in the same batch hits the same `ON CONFLICT` and fingerprint check.
 
-**The snapshot refresh.** A background task (every `BALANCE_REFRESH_MS`) adds the postings written since the last refresh to `ledger.balance_snapshots`, in one statement.
-- **The boundary is a transaction id, not an entry id.** Entry ids are handed out before commit, so a lower id can commit after a higher one, and a refresh by id would skip it for good.
-- Each journal entry records its writer's `pg_current_xact_id()`. A refresh folds entries with txid below `pg_snapshot_xmin(pg_current_snapshot())`: every transaction below it has finished, so nothing can still commit behind the boundary.
-- A test holds an entry uncommitted across a refresh and checks that the next refresh picks it up; another refreshes in a loop under parallel captures and compares with `STORED`.
-- `/v1/ledger/lag` reports the entries waiting for the next refresh and how old the oldest one is: that is how stale a read can be.
-- `verify` checks the snapshot against the postings below the boundary.
+Four more variants were measured and removed (the numbers are in [performance.md](performance.md)):
+- balances summed on read;
+- a periodic snapshot read with or without the tail since the refresh;
+- hot accounts split into sub-accounts;
+- TigerBeetle.
 
 What integrating TigerBeetle taught us (dual write, linked-transfer retries, static memory, io_uring) is in [ledger-comparison.md](ledger-comparison.md).
 
@@ -115,11 +120,12 @@ Where the brief is open, these are the decisions and why.
   - The balance is exact at the moment a decision is made.
 - **Rejected: recompute on read** (`SUM` over all postings). Fine at small scale, but O(postings) per report: 5–10 s at 100k payments.
 - **Rejected: periodic snapshots + tail sum.** Exact and lock-free on write, but every read pays for the tail; under a mixed load it halved the holding rate.
-- **Kept as an option: snapshot only (`BATCHED`).** Lock-free on write, constant-cost reads, stale by up to one refresh. Good for reports, not for decisions that need the balance at that moment.
+- **Rejected: snapshot only.** Constant-cost reads, but stale by up to one refresh, and writes get no cheaper: each request still commits on its own.
+- **Kept as an option: group commit (`BATCHED`).** Still synchronous and exact, but a batch of requests shares one commit and one balance update per account.
 - **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
 
-The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is not the limit: the service tops out at ~400 captures/s on CPU, even with every payment on one merchant, and taking the lock away or splitting the accounts gained nothing. If it ever becomes the limit, the known remedies are:
-- `BALANCE_MODE=BATCHED` (in the code): no account locks on write;
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is not the limit: sampled lock waits were 0% at every load, even with every payment on one merchant. The ceiling (~300–400 captures/s) is the app's CPU and the per-request commit, which is why group commit (`BATCHED`) lifted it by about a third and splitting accounts gained nothing. If it ever becomes the limit, the known remedies are:
+- `BALANCE_MODE=BATCHED` (in the code): group commit, one commit and one balance update per account per batch;
 - splitting a hot account into N sub-accounts (measured, then removed);
 - moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
 
@@ -184,9 +190,9 @@ Two Gradle test suites ([JVM Test Suite plugin](https://docs.gradle.org/current/
 The integration suite covers:
 - **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, analytics, validation.
 - **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
-- **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; batched reads lag until a refresh; refreshes during concurrent captures lose nothing.
+- **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; in a batch, a conflicting capture and an over-refund fail alone while their neighbours commit; concurrent batched captures lose nothing.
 - **Database invariants**: data goes in through the API, then raw SQL tries to go around it: unbalanced postings are rejected at commit, history is append-only, and a drifted stored balance shows up in `/v1/ledger/verify`.
-- **Ledger level** (`ledger/`, the only test below the API): a transaction held open across a snapshot refresh.
+- **Ledger level** (`ledger/`, the only test below the API): the group committer with a batch composed on purpose: 20 requests, one failing after it wrote its entry; the other 19 commit in fewer than 20 batches, the failed one leaves nothing behind.
 
 Tests run against a real Postgres:
 - in the compose `test` service, a throwaway `postgres-test` (tmpfs);

@@ -42,28 +42,31 @@ We built `TigerBeetleLedger` as a second implementation of the ledger interface,
 
 ## Measured under the same budget
 
-2 CPUs and 3 GB for the whole system under test. Full method and numbers: [performance.md](performance.md).
+2 CPUs and 3 GB for the whole system under test. Full method and numbers: [performance.md](performance.md). Round 1 ran next to other containers, round 2 on a quiet host; compare variants within a round.
 
-| Variant | Highest holding rate: capture / hot merchant / mixed | Balance report @ 100k payments (p95) | Read staleness |
-|---|---|---|---|
-| Postgres, stored balances | 400 / 400 / 498 rps | 2 ms | none |
-| Postgres, batched snapshot (1 s) | 350 / 350 / 350 rps | 3 ms | ≤ 1 s |
-| Postgres, snapshot + tail | 399 / 349 / 200 rps | 10 ms | none |
-| Postgres, summed on read | 350 / 350 / — | 9.6 s | none |
-| Postgres, stored, 8 sub-accounts | 350 / 350 / 300 rps | 3 ms | none |
-| TigerBeetle (+ Postgres for business rows) | none held at 200 rps | 22 ms | none |
+| Variant | Round | Highest holding rate: capture / hot merchant / mixed | Balance report @ 100k payments (p95) | Read staleness |
+|---|---|---|---|---|
+| Postgres, stored balances | 2 | 299 / 299 / 300 rps | 2 ms | none |
+| Postgres, group commit, batches of 100 | 2 | 400 / 400 / 400 rps | 2 ms | none |
+| Postgres, stored balances | 1 | 400 / 400 / 498 rps | 2 ms | none |
+| Postgres, snapshot only (1 s) | 1 | 350 / 350 / 350 rps | 3 ms | ≤ 1 s |
+| Postgres, snapshot + tail | 1 | 399 / 349 / 200 rps | 10 ms | none |
+| Postgres, summed on read | 1 | 350 / 350 / — | 9.6 s | none |
+| Postgres, stored, 8 sub-accounts | 1 | 350 / 350 / 300 rps | 3 ms | none |
+| TigerBeetle (+ Postgres for business rows) | 1 (twice) | 200 / 200 / 200 rps in one run; stalled in the other | 8–22 ms | none |
 
-All Postgres variants hit the same CPU ceiling; balance locking was never the bottleneck. TigerBeetle's ~2.3 GB of static memory starved the app and Postgres under this budget, and the dual write added a network round trip to every request.
+Row-lock waits were 0% at every step, even with every payment on one merchant. The ceiling is the app's CPU and the per-request commit, which is why group commit helps and sub-accounts did not. TigerBeetle's ~2.3 GB of static memory starved the app and Postgres under this budget, and the dual write added a network round trip to every request.
 
 ## Decision
 
-**Our own ledger on Postgres, with stored balances.** It is the only option where the payment, its idempotency record and its journal entry commit in one transaction. It was also the fastest variant we measured, and it adds nothing to operate.
+**Our own ledger on Postgres, with stored balances.** It is the only option where the payment, its idempotency record and its journal entry commit in one transaction, and it adds nothing to operate.
 
-- **Next step if hot accounts or reads ever become the bottleneck:** `BALANCE_MODE=BATCHED`, kept in the code. Writes take no account locks, and reads come from a snapshot that is at most one refresh old (`/v1/ledger/lag` shows how old). Decisions that need an exact balance read the snapshot plus the tail.
+- **Next step when throughput matters:** `BALANCE_MODE=BATCHED`, kept in the code. Group commit runs queued requests in batches: one transaction, one commit and one balance update per account per batch, with a savepoint per request. Balances stay exact and synchronous; at batch size 100 it lifted the ceiling from ~300 to ~400 rps on this budget. The step after that is batching the SQL itself (multi-row inserts per batch).
 - **Removed after measuring:**
   - summed-on-read balances: reads grow with history;
   - snapshot + tail: the read cost was paid on every report;
-  - hot-account sub-accounts: no gain without lock contention;
+  - snapshot only: stale reads, and writes no cheaper;
+  - hot-account sub-accounts: there was no lock contention to remove;
   - the TigerBeetle engine.
 - **When to revisit TigerBeetle:** sustained thousands of transfers per second concentrated on a few accounts (a single merchant or a single clearing account), with a budget for a dedicated, replicated TigerBeetle cluster and an outbox/reconciliation job for the dual write. That is far beyond this service's few TPS average and low hundreds at peak.
 - **Formance / SaaS:** worth a look when ledger features (Numscript flows, multi-tenant books, a hosted audit trail) matter more than single-transaction atomicity with our own records.

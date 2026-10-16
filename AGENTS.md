@@ -15,9 +15,9 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
 - **Status:** feature-complete for the brief, including the nice-to-haves (partial refunds, multi-currency). Extras:
   - `asOf` reports, journal, analytics API and a multi-page console with per-merchant breakdowns;
   - a deterministic ~100k-payment demo dataset;
-  - two balance modes (`STORED`, `BATCHED` snapshot with `/v1/ledger/lag`), chosen after benchmarking six variants (incl. TigerBeetle) under 2 CPUs / 3 GB; the other four were removed (docs/performance.md, commit `0ffcf3f` has them).
+  - two balance modes, `STORED` and `BATCHED` (group commit), chosen after benchmarking (docs/performance.md); computed, snapshot, sharded and TigerBeetle variants were measured and removed (commit `0ffcf3f` has them).
 
-  53 tests: 19 unit, 34 integration. CI runs the Docker path.
+  54 tests: 20 unit, 34 integration. CI runs the Docker path.
 - **Platforms:** must run on macOS, Linux and Windows. This is guaranteed by running everything in Linux containers (Docker / Docker Desktop).
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -61,7 +61,8 @@ docs/ledger-comparison.md        platforms compared + the decision; docs/perform
 src/main/kotlin/io/github/refined/morledger/
   Application.kt                 main(), AppConfig (env), Application.module()
   money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
-  ledger/Ledger.kt               model + Ledger: post, balances (BALANCE_MODE=STORED running balances | BATCHED snapshot), refresh, lag, verify, entries
+  ledger/Ledger.kt               model + Ledger: post (balance deltas now or collected), applyDeltas, balances, verify, entries
+  ledger/GroupCommitter.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, savepoint per request, one balance UPDATE per account
   ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
   payments/                      PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
   reports/BalanceReport.kt       ledger balances -> report
@@ -84,7 +85,7 @@ docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + a
 docker compose --profile test run --rm test      # test suite in the build stage, against postgres-test (tmpfs)
 docker compose logs -f app
 docker compose --profile tools run --rm k6 run seed.js                     # demo data (~100k payments, ~3 min)
-perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-batched
+perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-batched-10 pg-batched-100
 docker compose --profile test down               # stop everything; -v also drops pgdata
 ```
 
@@ -97,7 +98,7 @@ gradle build                  # compile + both suites (integration via Testconta
 gradle run                    # service on http://localhost:8090 (stop the app container first: same port)
 ```
 
-Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`), `BALANCE_MODE` (`STORED` | `BATCHED`), `BALANCE_REFRESH_MS` (1000).
+Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`), `BALANCE_MODE` (`STORED` | `BATCHED`), `BATCH_MAX_SIZE` (100), `BATCH_MAX_WAIT_MS` (0).
 
 URLs: `/ui/` demo console, `/docs/` Swagger, `/openapi.yaml` spec. **Keep `openapi.yaml` in sync with `api/Dto.kt` and `api/Routes.kt`.**
 
@@ -195,12 +196,12 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 | 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
 | 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → short assumptions and trade-offs. Details go to `docs/design.md` |
-| 22 | Balance modes | One `Ledger` class; `BALANCE_MODE=STORED` (default) or `BATCHED`; a test proves both report identical balances. BATCHED refreshes by transaction id (`pg_snapshot_xmin`), not entry id, so late commits are never skipped; `/v1/ledger/lag` reports staleness |
-| 23 | Removed variants (2026-10-16) | COMPUTED, SNAPSHOT, hot-account sharding and the TigerBeetle engine were benchmarked and removed: no throughput gain on 2 CPUs, slow reads (COMPUTED/SNAPSHOT), TB starved by 2.3 GB static memory + dual write. Findings in docs/performance.md and docs/ledger-comparison.md; code at commit `0ffcf3f` |
+| 22 | Balance modes | `BALANCE_MODE=STORED` (default): one tx per request. `BATCHED`: group commit (`GroupCommitter`): a single writer runs queued requests in batches, one tx, savepoint per request, one summed balance UPDATE per account, answers after commit, per-item retry if the commit fails. Balances exact in both; a test proves identical reports |
+| 23 | Removed variants (2026-10-16) | COMPUTED (slow reads), snapshot + tail (reads pay the tail), snapshot-only (stale, writes no cheaper), hot-account sharding (test uninformative: merchant row not sharded, CPU-bound) and the TigerBeetle engine (starved by 2.3 GB static memory + dual write). Findings in docs/performance.md and docs/ledger-comparison.md; code at commit `0ffcf3f` |
 | 24 | Analytics | Computed from the business tables; `reconciled` = records-based merchant balance == ledger balance |
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |
 | 26 | Demo data | `perf/k6/seed.js`: deterministic (SEED), idempotent (PREFIX); ~100 Zipf-sized merchants, 3 currencies, 9 jurisdictions, ~7% refunds, 4 refund-heavy anomalies |
-| 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; a lag probe records BATCHED staleness |
+| 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; pg_stat_activity is sampled every 200 ms per step (share of active backends waiting on Lock / IO) |
 
 ## Ideas not done (candidates if time allows)
 
