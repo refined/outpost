@@ -14,7 +14,7 @@ const MERCHANTS = Number(__ENV.MERCHANTS || 100);
 const PAYMENTS = Number(__ENV.PAYMENTS || 100000);
 const DAYS = Number(__ENV.DAYS || 365);
 const PREFIX = __ENV.PREFIX || `seed${SEED}`;
-const NOW = Date.parse(__ENV.NOW || new Date().toISOString());
+const NOW = __ENV.NOW ? Date.parse(__ENV.NOW) : Math.floor(Date.now() / 86400000) * 86400000;
 
 const MERCHANT_LIST = merchants(SEED, MERCHANTS);
 

@@ -39,7 +39,49 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
 
-**Code layout.** The ledger engine ([`ledger/Ledger.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](../service/src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../service/src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+**Code layout.** The ledger engine ([`ledger/Ledger.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+
+## Ledger engines
+
+The ledger sits behind one interface, [`LedgerEngine`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt), so the approaches can be compared on the same code and data. None of the knobs changes a single number: a test runs the same money flow through every variant and compares the reports.
+
+| Setting | Values | What changes |
+|---|---|---|
+| `LEDGER_ENGINE` | `POSTGRES` (default), `TIGERBEETLE` | Where postings and balances live |
+| `BALANCE_MODE` (Postgres) | `STORED` (default), `COMPUTED`, `SNAPSHOT`, `BATCHED` | See below |
+| `BALANCE_REFRESH_MS` | `1000` (default) | `SNAPSHOT` / `BATCHED`: how often the snapshot is refreshed |
+| `HOT_ACCOUNT_SHARDS` | `1` (default) … `64` | Splits `psp_clearing`, `fee_revenue` and `tax_payable:*` into sub-accounts to spread row locks; reports fold them back |
+
+What the balance modes do, for one capture of 4 postings:
+
+| Mode | On posting | On a current-balance read | Fresh? |
+|---|---|---|---|
+| `STORED` | `UPDATE accounts SET balance = balance + x` on each account: a row lock held until commit | Read the column | Exact |
+| `COMPUTED` | Nothing beyond the postings | `SUM(postings)` per account: grows with history | Exact |
+| `SNAPSHOT` | Nothing beyond the postings | Snapshot + `SUM` of the postings not yet folded in (the tail) | Exact |
+| `BATCHED` | Nothing beyond the postings | Snapshot only | Stale by up to one refresh |
+
+**The snapshot refresh.** A background task (every `BALANCE_REFRESH_MS`) adds the postings written since the last refresh to `ledger.balance_snapshots`, in one statement.
+- **The boundary is a transaction id, not an entry id.** Entry ids are handed out before commit, so a lower id can commit after a higher one, and a refresh by id would skip it for good.
+- Each journal entry records its writer's `pg_current_xact_id()`. A refresh folds entries with txid below `pg_snapshot_xmin(pg_current_snapshot())`: every transaction below it has finished, so nothing can still commit behind the boundary.
+- A test holds an entry uncommitted across a refresh and checks that the next refresh picks it up; another refreshes in a loop under parallel captures and compares with `SUM`.
+- `/v1/ledger/lag` reports the entries waiting for the next refresh and, for `BATCHED`, how old the oldest one is: that is how stale a read can be.
+- `verify` checks the snapshot against the postings below the boundary.
+
+The TigerBeetle mapping, and what integrating it taught us (dual write, linked-transfer retries, static memory, io_uring), is in [ledger-comparison.md](ledger-comparison.md). The measured differences are in [performance.md](performance.md).
+
+## Analytics and the console
+
+The console's per-merchant breakdown, time series and money-flow diagram come from `/v1/analytics/*`. These aggregate the business records (`payments`, `refunds`), which carry the full split of every event, so they work with any ledger engine.
+- **Cross-check.** Each merchant row carries a `reconciled` flag: the balance computed from the records must equal the merchant's balance in the ledger.
+- **Ledger page.** `/v1/ledger/accounts` lists every account, and `/v1/ledger/verify` checks that each stored balance equals the sum of its postings.
+
+**Demo data.** [`perf/k6/seed.js`](../perf/k6/seed.js) generates the demo data deterministically from `SEED`:
+- ~100 Zipf-sized merchants, a few of them refund-heavy;
+- ~100k payments over a year, in 3 currencies and 9 jurisdictions;
+- ~7% refunds, 30% of them partial.
+
+It goes through the public API, so it exercises the same code paths as real traffic, and it is idempotent.
 
 ## Assumptions
 
@@ -134,19 +176,28 @@ Alternatives considered:
 ## Tests and CI
 
 ```bash
-docker compose --profile test run --rm test      # Docker only
-gradle test                                      # without Docker: needs JDK 17+ and Gradle 9
+docker compose --profile test run --rm test      # Docker only: both suites
+gradle test                                      # without Docker: unit tests only (JDK 17+, Gradle 9)
+gradle check                                     # without Docker: both suites (Testcontainers needs a Docker daemon)
 ```
 
-What the suite covers:
-- **Money math**: unit tests plus a seeded property test over 10,000 random payments and refund sequences, checking no drift, no negative parts and an exact final refund.
-- **Ledger**: balances; stored running balances equal the sum of postings (`Ledger.verify`), and drift is detected; database-level rejection of unbalanced entries; append-only history; accounts may change only their balance.
-- **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, and validation.
-- **Concurrency**: 16 parallel captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
+Two Gradle test suites ([JVM Test Suite plugin](https://docs.gradle.org/current/userguide/jvm_test_suite_plugin.html)):
+
+| Suite | Folder | What | Rule |
+|---|---|---|---|
+| `test` | `src/test/kotlin` | Unit tests of pure functions: money math (with a seeded property test over 10,000 random refund sequences), journal-entry validation, TigerBeetle transfer pairing, report folding, config parsing | No database, no app, no setup beyond constructing values |
+| `integrationTest` | `src/integrationTest/kotlin` | The service through its HTTP API (Ktor `testApplication`) against a real Postgres | Everything with state is tested here, through the API |
+
+The integration suite covers:
+- **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, analytics, validation.
+- **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
+- **Ledger modes**: the same flow through the API on every `BALANCE_MODE` and shard count gives identical reports; batched reads lag until a refresh; refreshes during concurrent captures lose nothing.
+- **Database invariants**: data goes in through the API, then raw SQL tries to go around it: unbalanced postings are rejected at commit, history is append-only, and a drifted stored balance shows up in `/v1/ledger/verify`.
+- **Engine level** (`ledger/`, the only tests below the API): a transaction held open across a snapshot refresh, and the TigerBeetle engine (retry idempotency, parity with Postgres), which needs an isolated id namespace per test.
 
 Tests run against a real Postgres:
 - in the compose `test` service, a throwaway `postgres-test` (tmpfs);
-- with `gradle test` on the host, one started by Testcontainers;
+- with `gradle check` on the host, one started by Testcontainers;
 - otherwise, any dedicated database set via `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`). The tests **drop and recreate its schema**, so never point it at data you care about.
 
 [CI](../.github/workflows/ci.yml) runs the same path as the README: it builds the image, brings up compose, runs an API smoke test (capture → refund → balanced report) and the test suite in Docker. Because everything runs in Linux containers, the result is the same on macOS, Windows and Linux hosts with Docker.
@@ -192,5 +243,6 @@ src/main/kotlin/io/github/refined/morledger/
 src/main/resources/
   db/migration/                Flyway: V1__schema.sql (ledger + business tables, constraints, triggers)
   web/                         demo console, Swagger page, openapi.yaml
-src/test/kotlin/...            unit, integration and concurrency tests
+src/test/kotlin/...            unit tests: pure functions only
+src/integrationTest/kotlin/... tests through the HTTP API against real Postgres
 ```

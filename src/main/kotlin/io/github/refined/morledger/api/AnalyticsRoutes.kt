@@ -18,8 +18,6 @@ import java.math.RoundingMode
 import java.time.Instant
 import java.time.format.DateTimeParseException
 
-// Read-only analytics for the demo console: totals, time series and the per-merchant breakdown.
-// Amounts are minor units; rates are fractions rounded to 4 decimals (display values, not money).
 
 @Serializable
 data class FlowDto(val count: Long, val gross: Long, val tax: Long, val fee: Long, val merchant: Long)

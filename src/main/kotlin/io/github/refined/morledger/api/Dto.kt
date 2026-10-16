@@ -8,7 +8,6 @@ import io.github.refined.morledger.payments.RefundResult
 import io.github.refined.morledger.reports.Balances
 import kotlinx.serialization.Serializable
 
-// Wire format. Money is always an integer number of minor units plus an ISO 4217 currency; rates are decimal strings.
 
 @Serializable
 data class CaptureRequest(

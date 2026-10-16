@@ -1,11 +1,3 @@
-# Everything runs in Docker; the host needs nothing but Docker.
-# Settings come from .env (optional; see .env.example). Without it, the defaults below apply.
-#
-#   docker compose up -d --build --wait            # Postgres + service -> http://localhost:8090/ui/
-#   docker compose --profile test run --rm test    # full test suite in a JDK container, against its own Postgres
-#   docker compose --profile tools run --rm k6 run seed.js   # demo dataset (~100k payments)
-#   docker compose --profile test down             # stop everything, incl. the test database (-v also drops data)
-
 services:
   postgres:
     image: postgres:17-alpine
@@ -34,6 +26,7 @@ services:
       REFUND_FEE_POLICY: ${REFUND_FEE_POLICY:-MOR_KEEPS_FEE}
       BALANCE_MODE: ${BALANCE_MODE:-STORED}
       HOT_ACCOUNT_SHARDS: ${HOT_ACCOUNT_SHARDS:-1}
+      BALANCE_REFRESH_MS: ${BALANCE_REFRESH_MS:-1000}
       LEDGER_ENGINE: ${LEDGER_ENGINE:-POSTGRES}
       TB_ADDRESS: tigerbeetle:3000
     ports:
@@ -45,7 +38,6 @@ services:
         condition: service_started
         required: false # only with the "tb" profile
 
-  # ── TigerBeetle (profile "tb"): the alternative ledger engine, LEDGER_ENGINE=TIGERBEETLE. ──────────────────────
   tigerbeetle:
     profiles: [tb]
     image: ghcr.io/tigerbeetle/tigerbeetle:0.17.9
@@ -58,7 +50,6 @@ services:
     volumes:
       - tbdata:/data
 
-  # ── Tests (profile "test"): the build stage of the Dockerfile runs Gradle against a throwaway database. ──────
   postgres-test:
     profiles: [test]
     image: postgres:17-alpine
@@ -79,8 +70,8 @@ services:
     build:
       context: .
       target: build
-    security_opt: ["seccomp=unconfined"] # for the TigerBeetle client in TigerBeetleLedgerTest
-    command: ["gradle", "--no-daemon", "test", "--rerun"] # always execute, never reuse cached results
+    security_opt: ["seccomp=unconfined"] # the TigerBeetle client uses io_uring
+    command: ["gradle", "--no-daemon", "test", "--rerun", "integrationTest", "--rerun"] # always execute, never reuse cached results
     environment:
       TEST_DB_URL: jdbc:postgresql://postgres-test:5432/mor_ledger_test
       TEST_DB_USER: mor
@@ -106,7 +97,6 @@ services:
     tmpfs:
       - /data
 
-  # ── Tools (profile "tools"): k6 for the demo dataset and the benchmarks (scripts in perf/k6). ──────────────────
   k6:
     profiles: [tools]
     image: grafana/k6:2.3.0

@@ -3,6 +3,7 @@ package io.github.refined.morledger
 import io.github.refined.morledger.api.installErrorHandling
 import io.github.refined.morledger.api.routes
 import io.github.refined.morledger.db.Database
+import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.BalanceMode
 import io.github.refined.morledger.ledger.LedgerEngine
 import io.github.refined.morledger.ledger.PostgresLedger
@@ -14,6 +15,7 @@ import io.github.refined.morledger.reports.Analytics
 import io.github.refined.morledger.reports.BalanceReport
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.application.install
 import io.ktor.server.application.log
 import io.ktor.server.engine.embeddedServer
@@ -22,6 +24,8 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import kotlinx.serialization.json.Json
 import java.math.BigDecimal
 import java.time.Clock
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.sql.DataSource
 
 data class AppConfig(
@@ -51,6 +55,9 @@ data class AppConfig(
                 hotAccountShards = (env["HOT_ACCOUNT_SHARDS"] ?: "1").toInt().also {
                     require(it in 1..64) { "HOT_ACCOUNT_SHARDS must be in [1, 64]" }
                 },
+                balanceRefreshMs = (env["BALANCE_REFRESH_MS"] ?: "1000").toLong().also {
+                    require(it >= 0) { "BALANCE_REFRESH_MS must be >= 0" }
+                },
             ),
         )
     }
@@ -58,12 +65,12 @@ data class AppConfig(
 
 enum class LedgerEngineKind { POSTGRES, TIGERBEETLE }
 
-/** Ledger engine options; the non-default ones exist to compare approaches (docs/performance.md). */
 data class LedgerSettings(
     val engine: LedgerEngineKind = LedgerEngineKind.POSTGRES,
     val balanceMode: BalanceMode = BalanceMode.STORED,
     val hotAccountShards: Int = 1,
     val tigerBeetleAddress: String = "tigerbeetle:3000",
+    val balanceRefreshMs: Long = 1000,
 ) {
     fun engine(): LedgerEngine = when (engine) {
         LedgerEngineKind.POSTGRES -> PostgresLedger(balanceMode)
@@ -78,6 +85,18 @@ fun main() {
     embeddedServer(Netty, port = config.port) { module(dataSource, config.pricing, ledger = config.ledger) }.start(wait = true)
 }
 
+private fun Application.startBalanceRefresher(dataSource: DataSource, engine: LedgerEngine, periodMs: Long) {
+    val scheduler = Executors.newSingleThreadScheduledExecutor { Thread(it, "balance-refresher").apply { isDaemon = true } }
+    scheduler.scheduleWithFixedDelay({
+        try {
+            dataSource.transaction { engine.refreshBalances(it) }
+        } catch (e: Exception) {
+            log.warn("Balance refresh failed; retrying next tick", e)
+        }
+    }, periodMs, periodMs, TimeUnit.MILLISECONDS)
+    monitor.subscribe(ApplicationStopped) { scheduler.shutdownNow() }
+}
+
 fun Application.module(
     dataSource: DataSource,
     pricing: PricingSettings = PricingSettings(),
@@ -86,8 +105,8 @@ fun Application.module(
 ) {
     val engine = ledger.engine()
     log.info("Ledger engine: {}, hot-account shards: {}", engine.description, ledger.hotAccountShards)
+    if (engine.refreshesBalances && ledger.balanceRefreshMs > 0) startBalanceRefresher(dataSource, engine, ledger.balanceRefreshMs)
     install(ContentNegotiation) {
-        // Strict: a misspelled optional field (e.g. "ammount" on a refund) must fail, not silently become a full refund.
         json(Json { ignoreUnknownKeys = false })
     }
     installErrorHandling()

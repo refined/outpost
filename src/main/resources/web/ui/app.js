@@ -1,7 +1,4 @@
-// MoR Ledger Console: a thin client over the public API (vanilla JS, hash routing, Chart.js).
 "use strict";
-
-// ── Utilities ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const view = document.getElementById("view");
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -32,7 +29,7 @@ function refundBadge(rate) {
 }
 const reconciledBadge = (ok) => ok ? `<span class="badge good">matches</span>` : `<span class="badge bad">mismatch</span>`;
 
-/** "121.5" EUR -> 12150, string-based (no floating point). */
+// String math, no floating point: "121.5" EUR -> 12150.
 function toMinor(text, cur) {
   const d = digits(cur);
   const m = String(text).trim().match(/^(\d+)(?:[.,](\d*))?$/);
@@ -42,7 +39,7 @@ function toMinor(text, cur) {
   return Number(m[1] + frac.padEnd(d, "0"));
 }
 
-/** "21" -> "0.21", "7.25" -> "0.0725" (string math, exact). */
+// "21" -> "0.21", "7.25" -> "0.0725", exactly.
 function percentToRate(text) {
   const m = String(text).trim().match(/^(\d+)(?:[.,](\d+))?$/);
   if (!m) throw new Error(`"${text}" is not a percentage`);
@@ -53,8 +50,6 @@ function percentToRate(text) {
 }
 
 const newId = (prefix) => `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-
-// ── API ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 const apiLog = [];
 async function api(path, body) {
@@ -78,8 +73,6 @@ function toast(text) {
   document.body.append(t);
   setTimeout(() => t.remove(), 4000);
 }
-
-// ── Shared state: currency and time range ────────────────────────────────────────────────────────────────
 
 const RANGES = { "30d": { days: 30, bucket: "day" }, "90d": { days: 90, bucket: "day" }, "1y": { days: 365, bucket: "week" }, all: { days: null, bucket: "month" } };
 const state = {
@@ -114,8 +107,6 @@ function rangeButtons(onChange) {
   return seg;
 }
 
-// ── Charts ────────────────────────────────────────────────────────────────────────────────────────────────
-
 let charts = [];
 const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 function destroyCharts() { charts.forEach((c) => c.destroy()); charts = []; }
@@ -134,7 +125,6 @@ function axisMoney(cur) {
   return { grid: { color: token("--grid") }, border: { display: false }, ticks: { callback: (v) => money(v * 10 ** digits(cur), cur, true) } };
 }
 
-/** Captured vs refunded per bucket: two series, so a legend; one money axis. */
 function activityChart(canvas, points, cur) {
   charts.push(new Chart(canvas, {
     type: "bar",
@@ -155,7 +145,6 @@ function activityChart(canvas, points, cur) {
   }));
 }
 
-/** One series (the title names it): what the MoR owes the merchant over time. */
 function balanceChart(canvas, points, cur) {
   charts.push(new Chart(canvas, {
     type: "line",
@@ -188,11 +177,7 @@ function jurisdictionChart(canvas, rows, cur) {
   }));
 }
 
-/**
- * Where the customers' money went: split into tax / MoR fee / merchant share, and each part into what was refunded
- * and what is still owed. Flows are clamped at zero: with the fee kept on refunds, a merchant's refunded share can
- * exceed its captured share (the merchant then owes the MoR); the note under the chart says so.
- */
+// Flows are clamped at zero: with the fee kept on refunds, a merchant's refunded share can exceed its captured share.
 function moneyFlowChart(canvas, captured, refunded, cur) {
   const nodes = {
     paid: "Customers", tax: "Tax", fee: "MoR fee", merchant: "Merchants",
@@ -247,8 +232,6 @@ function dataTable(points, cur) {
     <tbody>${points.map((p) => `<tr><td>${esc(p.start)}</td>${moneyCell(p.captured.gross, cur)}${moneyCell(p.refunded.gross, cur)}${moneyCell(p.netGross, cur)}${moneyCell(p.merchantBalance, cur)}</tr>`).join("")}</tbody>
   </table></div></details>`;
 }
-
-// ── Pages ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 const kpi = (label, value, foot = "", neg = false) =>
   `<div class="kpi"><div class="label">${esc(label)}</div><div class="value${neg ? " neg" : ""}">${value}</div><div class="foot">${foot}</div></div>`;
@@ -580,8 +563,6 @@ async function simulatePage() {
   renderLog();
 }
 
-// ── Router ────────────────────────────────────────────────────────────────────────────────────────────────
-
 const ROUTES = [
   [/^#?\/?$/, "overview", overviewPage],
   [/^#\/merchants\/?$/, "merchants", merchantsPage],
@@ -595,7 +576,7 @@ let lastHash = null;
 async function render() {
   const ticket = ++rendering;
   const hash = location.hash || "#/";
-  if (hash !== lastHash) { window.scrollTo(0, 0); lastHash = hash; } // new page: start at the top; same page: keep the position
+  if (hash !== lastHash) { window.scrollTo(0, 0); lastHash = hash; }
   const [, name, page, args] = ROUTES.map(([re, n, fn]) => { const m = hash.match(re); return m && [m, n, fn, m.slice(1).map(decodeURIComponent)]; }).find(Boolean)
     || [null, "overview", overviewPage, []];
   document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === name));

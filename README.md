@@ -20,7 +20,9 @@ This service is the MoR's **ledger**: the source of truth for who is owed what. 
   - how much the MoR owes each tax authority;
   - what each merchant's balance with the MoR is, now or as of any past date;
 - **handle several currencies**, each kept separately;
-- **show it all** in a small web console.
+- **show what each merchant did**: volume, refunds, fees, tax and the running balance, in a web console.
+
+The ledger engine is swappable: our own double-entry ledger on Postgres (default), or **TigerBeetle**, compared side by side under the same resource budget ([ledger comparison](docs/ledger-comparison.md), [performance](docs/performance.md)).
 
 ## How it works
 
@@ -31,17 +33,24 @@ flowchart LR
     SW["Swagger<br/>/docs"] --> API
     subgraph service["MoR ledger service"]
         API["REST API /v1"] --> PAY["Payments<br/>split, idempotency, refund limits"]
-        API --> REP["Balances report"]
-        PAY --> LED["Ledger<br/>journal + account balances"]
+        API --> REP["Reports & analytics"]
+        PAY --> LED["Ledger engine<br/>journal + account balances"]
         REP --> LED
     end
-    LED --> DB[("PostgreSQL")]
+    PAY --> DB[("PostgreSQL<br/>payments, refunds,<br/>default ledger")]
+    LED --> DB
+    LED -. "LEDGER_ENGINE=TIGERBEETLE" .-> TB[("TigerBeetle")]
 ```
 
 There are three ways in:
 
 - **REST API** (`/v1`): what a payment provider's webhooks or a checkout would call.
-- **Demo console** (`/ui/`): capture and refund payments by hand, or run a scripted scenario, and watch the report and the journal update.
+- **Console** (`/ui/`), one page per question:
+  - **Overview**: what the MoR owes now, and the activity in a period: captured vs refunded over time, where the money went (a flow diagram), tax by jurisdiction, top merchants;
+  - **Merchants**: every merchant's volume, refunds, refund rate, fees, tax and balance, each checked against the ledger;
+  - **Merchant**: one merchant's activity and running balance, its payments (refund from there) and its journal entries;
+  - **Ledger**: every account, the journal, and a reconciliation of stored balances against postings;
+  - **Simulate**: send capture/refund events by hand or run a scripted scenario.
 - **Swagger** (`/docs/`): the interactive API spec.
 
 ### The API
@@ -134,18 +143,26 @@ A refund is the mirror entry for the refunded part.
 Only **Docker** is needed:
 
 ```bash
-docker compose up -d --build --wait              # build and start Postgres + the service
-docker compose --profile test run --rm test      # run the test suite in a container
-docker compose --profile test down               # stop everything
+docker compose up -d --build --wait                        # build and start Postgres + the service
+docker compose --profile tools run --rm k6 run seed.js     # optional: demo data, ~100 merchants / 100k payments over a year (~3 min)
+docker compose --profile test run --rm test                # run the test suite in a container (incl. a TigerBeetle)
+docker compose --profile test --profile tb down            # stop everything
+```
+
+The same stack on **TigerBeetle** instead of the Postgres ledger, and the benchmark of all engine variants:
+
+```bash
+LEDGER_ENGINE=TIGERBEETLE docker compose --profile tb up -d --build --wait
+perf/run-benchmarks.sh                                     # ~1 h; writes perf/results/<time>/summary.md
 ```
 
 | URL | |
 |---|---|
-| http://localhost:8090/ui/ | Demo console |
+| http://localhost:8090/ui/ | Console |
 | http://localhost:8090/docs/ | Swagger UI |
 | [docs/demo.http](docs/demo.http) | The demo scenario as HTTP requests |
 
-Ports, database credentials, the fee rate and the refund policy can be changed in an optional `.env`. Start from [.env.example](.env.example); without a `.env`, the defaults apply.
+Ports, database credentials, the fee rate, the refund policy and the ledger engine settings can be changed in an optional `.env`. Start from [.env.example](.env.example); without a `.env`, the defaults apply.
 
 ## Assumptions
 

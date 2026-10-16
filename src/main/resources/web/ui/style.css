@@ -1,4 +1,3 @@
-/* Tokens: chart/ink/series values from the validated dataviz reference palette (light + dark selected separately). */
 :root {
   color-scheme: light;
   --page: #f9f9f7;
@@ -79,8 +78,6 @@ body {
 
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
-
-/* ── Top bar ─────────────────────────────────────────────────────────────────────────────────────────────── */
 .top {
   position: sticky; top: 0; z-index: 5;
   display: flex; align-items: center; gap: 24px;
@@ -105,8 +102,6 @@ main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
   .top-right { margin-left: 0; }
   main { padding: 16px; }
 }
-
-/* ── Page structure ──────────────────────────────────────────────────────────────────────────────────────── */
 .page-head { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .page-head h1 { font-size: 20px; margin: 0; }
 .page-head .sub { color: var(--ink-2); margin: 2px 0 0; }
@@ -131,16 +126,12 @@ main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 48px; }
 .chart.tall { height: 340px; }
 .chart.short { height: 220px; }
 .scroll { overflow-x: auto; }
-
-/* ── KPI tiles ───────────────────────────────────────────────────────────────────────────────────────────── */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
 .kpi .label { color: var(--ink-2); font-size: 12px; }
 .kpi .value { font-size: 22px; font-weight: 650; margin-top: 2px; }
 .kpi .value.neg { color: var(--neg); }
 .kpi .foot { color: var(--muted); font-size: 12px; margin-top: 2px; }
-
-/* ── Controls ────────────────────────────────────────────────────────────────────────────────────────────── */
 input, select {
   font: inherit; color: var(--ink); background: var(--raised);
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; min-width: 0;
@@ -160,8 +151,6 @@ button:disabled { opacity: .45; cursor: default; }
 form.stack { display: flex; flex-direction: column; gap: 10px; }
 label { display: flex; flex-direction: column; gap: 4px; font-weight: 500; flex: 1; min-width: 0; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
-
-/* ── Tables ──────────────────────────────────────────────────────────────────────────────────────────────── */
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 th { font-size: 12px; color: var(--muted); font-weight: 600; }
@@ -177,7 +166,6 @@ tr.entry-start td { border-top: 2px solid var(--axis); }
 
 .pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 10px; color: var(--ink-2); }
 
-/* ── Badges (status = icon + label, never colour alone) ──────────────────────────────────────────────────── */
 .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
 .badge.good { color: var(--good-ink); }
 .badge.good::before { content: "✓"; }

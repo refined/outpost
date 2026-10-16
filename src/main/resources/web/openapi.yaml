@@ -138,6 +138,26 @@ paths:
       responses:
         '200': { description: Result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, mismatches: { type: array, items: { type: object } } } } } } }
 
+  /v1/ledger/lag:
+    get:
+      tags: [Reports]
+      summary: How far the balance snapshot is behind (BALANCE_MODE=SNAPSHOT / BATCHED; zeros otherwise)
+      description: >
+        `pendingEntries` wait for the next snapshot refresh. `readLagMs` is how stale a current-balance read can be:
+        the age of the oldest pending entry in BATCHED mode, 0 when reads are exact.
+      responses:
+        '200':
+          description: Lag
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pendingEntries: { type: integer, format: int64 }
+                  oldestPendingAgeMs: { type: integer, format: int64 }
+                  readLagMs: { type: integer, format: int64 }
+                  refreshedAt: { type: string, format: date-time, nullable: true }
+
   /v1/analytics/summary:
     get:
       tags: [Analytics]

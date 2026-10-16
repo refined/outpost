@@ -7,33 +7,17 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.util.concurrent.ConcurrentHashMap
 
-/** How current balances are kept. Switchable to compare the approaches (see docs/performance.md). */
-enum class BalanceMode {
-    /**
-     * Each account stores a running `balance`, moved in the same transaction as the postings with an atomic
-     * `UPDATE … SET balance = balance + x`. Reads are O(1); posting row-locks the touched accounts until commit.
-     */
-    STORED,
+enum class BalanceMode { STORED, COMPUTED, SNAPSHOT, BATCHED }
 
-    /** Nothing is stored: a current balance is `SUM(postings)` at read time. Posting takes no locks; reads are O(postings). */
-    COMPUTED,
-}
-
-/**
- * The ledger on Postgres (`ledger.*` tables). The database itself enforces that every entry balances (deferred
- * constraint trigger) and that history is append-only (triggers).
- *
- * With [BalanceMode.STORED], concurrent posts to the same account queue up on its row lock instead of losing updates.
- * Accounts are locked in id order (no deadlocks) and as the last statements of the transaction (short lock hold).
- * Historical (`asOf`) balances are always summed from postings.
- */
 class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) : LedgerEngine {
     override val description = "postgres (balances: ${balanceMode.name.lowercase()})"
+
+    override val refreshesBalances = balanceMode == BalanceMode.SNAPSHOT || balanceMode == BalanceMode.BATCHED
 
     override fun post(conn: Connection, entry: NewJournalEntry): Long {
         val lines = LedgerEngine.validated(entry)
 
-        // Creation order is fixed too: two transactions creating the same new accounts must not deadlock.
+        // Accounts are created and locked in a fixed order, so concurrent postings cannot deadlock.
         val accountIds = lines.map { it.account }.distinct().sortedBy { it.code + "|" + it.currency }
             .associateWith { accountId(conn, it) }
         val entryId = conn.prepareStatement(
@@ -78,12 +62,54 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
     override fun balances(conn: Connection, asOf: Instant?, currency: String?): List<AccountBalance> = when {
         asOf != null -> summedBalances(conn, asOf, currency)
         balanceMode == BalanceMode.STORED -> storedBalances(conn, currency)
-        else -> summedBalances(conn, null, currency)
+        balanceMode == BalanceMode.COMPUTED -> summedBalances(conn, null, currency)
+        else -> snapshotBalances(conn, currency, withTail = balanceMode == BalanceMode.SNAPSHOT)
     }
 
-    /** In [BalanceMode.COMPUTED] nothing is stored, so there is nothing to reconcile. */
+    // Boundary = pg_snapshot_xmin: every xid below it has finished, so no later commit can land behind the snapshot.
+    override fun refreshBalances(conn: Connection) {
+        conn.createStatement().use { st ->
+            st.executeQuery("SELECT boundary FROM ledger.snapshot_state FOR UPDATE").close()
+            st.executeUpdate(
+                """
+                WITH b AS (SELECT s.boundary AS old, pg_snapshot_xmin(pg_current_snapshot()) AS new FROM ledger.snapshot_state s),
+                d AS (SELECT p.account_id, SUM(p.amount) AS delta
+                      FROM ledger.postings p JOIN ledger.journal_entries e ON e.id = p.entry_id, b
+                      WHERE e.txid >= b.old AND e.txid < b.new
+                      GROUP BY p.account_id),
+                up AS (INSERT INTO ledger.balance_snapshots (account_id, balance) SELECT account_id, delta FROM d
+                       ON CONFLICT (account_id) DO UPDATE SET balance = ledger.balance_snapshots.balance + EXCLUDED.balance)
+                UPDATE ledger.snapshot_state SET boundary = (SELECT new FROM b), refreshed_at = now()
+                """.trimIndent(),
+            )
+        }
+    }
+
+    override fun lag(conn: Connection): LedgerLag {
+        if (!refreshesBalances) return LedgerLag.NONE
+        return conn.prepareStatement(
+            """
+            SELECT count(e.id), COALESCE(EXTRACT(EPOCH FROM now() - min(e.recorded_at)) * 1000, 0)::bigint,
+                   (SELECT refreshed_at FROM ledger.snapshot_state)
+            FROM ledger.journal_entries e WHERE e.txid >= (SELECT boundary FROM ledger.snapshot_state)
+            """.trimIndent(),
+        ).use { st ->
+            st.executeQuery().use { rs ->
+                rs.next()
+                val oldest = rs.getLong(2)
+                LedgerLag(
+                    pendingEntries = rs.getLong(1),
+                    oldestPendingAgeMs = oldest,
+                    readLagMs = if (balanceMode == BalanceMode.BATCHED) oldest else 0,
+                    refreshedAt = rs.getObject(3, OffsetDateTime::class.java).toInstant(),
+                )
+            }
+        }
+    }
+
     override fun verify(conn: Connection): List<BalanceMismatch> {
         if (balanceMode == BalanceMode.COMPUTED) return emptyList()
+        if (refreshesBalances) return verifySnapshot(conn)
         return conn.prepareStatement(
             """
             SELECT a.code, a.currency, a.normal_side, a.balance, COALESCE(SUM(p.amount), 0)
@@ -152,6 +178,46 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
             .map { (_, group) -> group.first().first.copy(postings = group.map { it.second }) }
     }
 
+    private fun verifySnapshot(conn: Connection): List<BalanceMismatch> =
+        conn.prepareStatement(
+            """
+            SELECT a.code, a.currency, a.normal_side, COALESCE(s.balance, 0), COALESCE(t.total, 0)
+            FROM ledger.accounts a
+            LEFT JOIN ledger.balance_snapshots s ON s.account_id = a.id
+            LEFT JOIN (SELECT p.account_id, SUM(p.amount) AS total
+                       FROM ledger.postings p JOIN ledger.journal_entries e ON e.id = p.entry_id
+                       WHERE e.txid < (SELECT boundary FROM ledger.snapshot_state)
+                       GROUP BY p.account_id) t ON t.account_id = a.id
+            WHERE COALESCE(s.balance, 0) <> COALESCE(t.total, 0)
+            ORDER BY a.currency, a.code
+            """.trimIndent(),
+        ).use { st ->
+            st.executeQuery().use { rs ->
+                buildList { while (rs.next()) add(BalanceMismatch(rs.toAccount(), rs.getLong(4), rs.getLong(5))) }
+            }
+        }
+
+    /** One statement, so the snapshot and the tail come from the same database snapshot. */
+    private fun snapshotBalances(conn: Connection, currency: String?, withTail: Boolean): List<AccountBalance> =
+        conn.prepareStatement(
+            """
+            SELECT a.code, a.currency, a.normal_side, COALESCE(s.balance, 0) + COALESCE(t.tail, 0)
+            FROM ledger.accounts a
+            LEFT JOIN ledger.balance_snapshots s ON s.account_id = a.id
+            LEFT JOIN (SELECT p.account_id, SUM(p.amount) AS tail
+                       FROM ledger.postings p JOIN ledger.journal_entries e ON e.id = p.entry_id
+                       WHERE ? AND e.txid >= (SELECT boundary FROM ledger.snapshot_state)
+                       GROUP BY p.account_id) t ON t.account_id = a.id
+            WHERE CAST(? AS TEXT) IS NULL OR a.currency = CAST(? AS TEXT)
+            ORDER BY a.currency, a.code
+            """.trimIndent(),
+        ).use { st ->
+            st.setBoolean(1, withTail)
+            st.setString(2, currency)
+            st.setString(3, currency)
+            st.executeQuery().use { rs -> buildList { while (rs.next()) add(AccountBalance(rs.toAccount(), rs.getLong(4))) } }
+        }
+
     private fun storedBalances(conn: Connection, currency: String?): List<AccountBalance> =
         conn.prepareStatement(
             """
@@ -165,7 +231,6 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(AccountBalance(rs.toAccount(), rs.getLong(4))) } }
         }
 
-    /** Σ postings per account, of entries effective at or before [asOf] (all entries when null). */
     private fun summedBalances(conn: Connection, asOf: Instant?, currency: String?): List<AccountBalance> =
         conn.prepareStatement(
             """
@@ -185,10 +250,7 @@ class PostgresLedger(private val balanceMode: BalanceMode = BalanceMode.STORED) 
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(AccountBalance(rs.toAccount(), rs.getLong(4))) } }
         }
 
-    /**
-     * Account ids never change, so they are cached. Only ids of rows that were already there are cached: a row this
-     * transaction just inserted might still roll back.
-     */
+    /** Only ids of rows that were already there are cached: a row this transaction just inserted might still roll back. */
     private val accountIds = ConcurrentHashMap<Account, Long>()
 
     private fun accountId(conn: Connection, account: Account): Long {

@@ -24,10 +24,6 @@ object Database {
     }
 }
 
-/**
- * Runs [block] in a single database transaction: commits on success, rolls back on any exception.
- * Every ledger write (business record + journal entry + postings) goes through one of these.
- */
 fun <T> DataSource.transaction(block: (Connection) -> T): T =
     connection.use { conn ->
         conn.autoCommit = false

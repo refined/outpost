@@ -27,7 +27,6 @@ fun DomainException.status(): HttpStatusCode = when (this) {
     is UnprocessableException -> HttpStatusCode.UnprocessableEntity
 }
 
-/** One error shape for every failure: `{"error": "<stable code>", "message": "<human readable>"}`. */
 fun Application.installErrorHandling() {
     install(StatusPages) {
         exception<DomainException> { call, e ->
@@ -37,7 +36,6 @@ fun Application.installErrorHandling() {
             call.respond(HttpStatusCode.NotImplemented, ErrorResponse("not_supported_by_ledger_engine", e.message ?: "not supported"))
         }
         exception<BadRequestException> { call, e ->
-            // Malformed JSON, missing or unknown fields, wrong types.
             val detail = generateSequence<Throwable>(e) { it.cause }.last().message ?: "malformed request"
             call.respond(HttpStatusCode.BadRequest, ErrorResponse("invalid_request", detail.lineSequence().first()))
         }

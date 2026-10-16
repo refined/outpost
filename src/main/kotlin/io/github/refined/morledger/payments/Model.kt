@@ -6,7 +6,6 @@ import io.github.refined.morledger.money.Split
 import java.math.BigDecimal
 import java.time.Instant
 
-/** MoR terms applied to new captures. Snapshotted on every payment, so changing them never rewrites history. */
 data class PricingSettings(
     val feeRate: BigDecimal = BigDecimal("0.05"),
     val refundFeePolicy: RefundFeePolicy = RefundFeePolicy.MOR_KEEPS_FEE,
@@ -54,7 +53,6 @@ data class Refund(
 
 enum class PaymentStatus { CAPTURED, PARTIALLY_REFUNDED, REFUNDED }
 
-/** A payment with its refunds and what can still be refunded. */
 data class PaymentDetails(val payment: Payment, val refunds: List<Refund>) {
     val refunded: Split = refunds.fold(Split.ZERO) { acc, r -> acc + r.split }
     val refundable: Split = Allocation.refundable(payment.split, payment.refundFeePolicy) - refunded
@@ -67,10 +65,8 @@ data class PaymentDetails(val payment: Payment, val refunds: List<Refund>) {
 
 data class RefundResult(val refund: Refund, val payment: PaymentDetails)
 
-/** The outcome of an idempotent write: [created] is false when the same request was already recorded. */
 data class Recorded<T>(val value: T, val created: Boolean)
 
-/** A business-rule failure with a stable machine-readable [code]; the API layer maps the type to an HTTP status. */
 sealed class DomainException(val code: String, message: String) : RuntimeException(message)
 
 class ValidationException(message: String) : DomainException("invalid_request", message)

@@ -16,13 +16,6 @@ import java.time.temporal.ChronoUnit
 import java.util.Currency
 import javax.sql.DataSource
 
-/**
- * Records captures and refunds. Each call is one database transaction: the business record and its journal entry
- * commit together or not at all.
- *
- * Idempotency: `paymentId` / `refundId` are the external event ids. Re-sending the same request returns the stored
- * result (`created = false`); re-using an id with a different payload is an [ConflictException].
- */
 class PaymentService(
     private val dataSource: DataSource,
     private val pricing: PricingSettings = PricingSettings(),
@@ -125,7 +118,7 @@ class PaymentService(
                 // The same refundId was just recorded for another payment (that payment's lock didn't stop us).
                 throw ConflictException("idempotency_conflict", "refund ${cmd.refundId} already exists")
             }
-            val shard = ChartOfAccounts.shardOf(payment.paymentId, hotAccountShards) // the capture's shard
+            val shard = ChartOfAccounts.shardOf(payment.paymentId, hotAccountShards)
             ledger.post(
                 conn,
                 NewJournalEntry(

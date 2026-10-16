@@ -15,7 +15,6 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import javax.sql.DataSource
 
-/** Captured and refunded money, split the same way as payments: gross = tax + fee + merchant. */
 data class Flow(val count: Long, val gross: Long, val tax: Long, val fee: Long, val merchant: Long) {
     operator fun minus(o: Flow) = Flow(count - o.count, gross - o.gross, tax - o.tax, fee - o.fee, merchant - o.merchant)
 
@@ -43,7 +42,6 @@ data class MerchantSummary(
     val refunded: Flow,
     val firstPaymentAt: Instant,
     val lastPaymentAt: Instant,
-    /** The merchant's account balance in the ledger; must equal captured.merchant − refunded.merchant. */
     val ledgerBalance: Long?,
 ) {
     val balanceFromRecords: Long get() = captured.merchant - refunded.merchant
@@ -69,11 +67,6 @@ enum class MerchantSort(val sql: String) {
     MERCHANT("merchant_id"),
 }
 
-/**
- * Read-only analytics over the business records (`payments`, `refunds`), which carry the full split of every event.
- * Reading those instead of the ledger keeps this independent of the ledger engine; [MerchantSummary.reconciled]
- * cross-checks each merchant against the ledger's own balance.
- */
 class Analytics(private val dataSource: DataSource, private val ledger: LedgerEngine = PostgresLedger()) {
 
     fun summary(currency: String?, from: Instant?, to: Instant?): List<CurrencySummary> = dataSource.transaction { conn ->
@@ -110,7 +103,6 @@ class Analytics(private val dataSource: DataSource, private val ledger: LedgerEn
             val refunded = series(refunds = true)
             if (captured.isEmpty() && refunded.isEmpty()) return@transaction emptyList()
 
-            // The merchant balance before the window, so the running balance starts from the right place.
             var balance = if (from == null) 0L else {
                 val before = flows(conn, "'x'", currency, merchantId, null, from, refunds = false).firstOrNull()?.second ?: Flow.ZERO
                 val beforeRefunds = flows(conn, "'x'", currency, merchantId, null, from, refunds = true).firstOrNull()?.second ?: Flow.ZERO
@@ -164,9 +156,7 @@ class Analytics(private val dataSource: DataSource, private val ledger: LedgerEn
         return rows.map { it.copy(ledgerBalance = balances[it.merchantId to it.currency]) }
     }
 
-    // ── SQL helpers ───────────────────────────────────────────────────────────────────────────────────────────
 
-    /** One row per (merchant, currency) with captured and refunded flows. */
     private fun merchantRowsSql() = """
         SELECT cap.merchant_id, cap.currency,
                cap.c_count, cap.c_gross, cap.c_tax, cap.c_fee, cap.c_merchant, cap.first_at, cap.last_at,
@@ -196,7 +186,6 @@ class Analytics(private val dataSource: DataSource, private val ledger: LedgerEn
         ledgerBalance = null,
     )
 
-    /** Σ of captures (or refunds) grouped by the SQL expression [key]; time filters apply to the event time. */
     private fun flows(
         conn: Connection,
         key: String,

@@ -46,17 +46,44 @@ dependencies {
     runtimeOnly("org.flywaydb:flyway-database-postgresql:$flyway")
     runtimeOnly("org.postgresql:postgresql:42.7.14")
     runtimeOnly("ch.qos.logback:logback-classic:1.6.5")
-
-    testImplementation(kotlin("test"))
-    testImplementation("io.ktor:ktor-server-test-host:$ktor")
-    testImplementation(platform("org.junit:junit-bom:6.1.3"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-    testImplementation("org.testcontainers:testcontainers-postgresql:2.0.5")
 }
 
-tasks.test {
-    useJUnitPlatform()
+// Two suites: `test` = unit tests of pure code (no database, no app); `integrationTest` = the service through its
+// HTTP API against a real Postgres. `gradle check` runs both.
+testing {
+    suites {
+        withType<JvmTestSuite>().configureEach {
+            useJUnitJupiter("6.1.3")
+            dependencies {
+                implementation("org.jetbrains.kotlin:kotlin-test:2.4.21")
+            }
+        }
+
+        register<JvmTestSuite>("integrationTest") {
+            dependencies {
+                implementation(project())
+                implementation("io.ktor:ktor-server-test-host:$ktor")
+                implementation("org.testcontainers:testcontainers-postgresql:2.0.5")
+            }
+            targets.configureEach {
+                testTask.configure { shouldRunAfter(tasks.test) }
+            }
+        }
+    }
+}
+
+configurations["integrationTestImplementation"].extendsFrom(configurations.implementation.get())
+configurations["integrationTestRuntimeOnly"].extendsFrom(configurations.runtimeOnly.get())
+
+kotlin.target.compilations.named("integrationTest") {
+    associateWith(kotlin.target.compilations.getByName("main"))
+}
+
+tasks.check {
+    dependsOn(testing.suites.named("integrationTest"))
+}
+
+tasks.withType<Test>().configureEach {
     // One line per test: in Docker there is no HTML report to open, so the console is the report.
     testLogging {
         events("passed", "skipped", "failed")

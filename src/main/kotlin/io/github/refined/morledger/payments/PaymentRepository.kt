@@ -7,10 +7,8 @@ import java.sql.ResultSet
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
-/** A stored row together with the fingerprint of the request that created it. */
 data class Stored<T>(val value: T, val fingerprint: String)
 
-/** SQL for the `payments` and `refunds` tables. Callers own the transaction. */
 object PaymentRepository {
     private const val PAYMENT_COLUMNS = """
         payment_id, merchant_id, currency, tax_amount, fee_amount, merchant_amount, tax_rate, tax_jurisdiction,
@@ -21,7 +19,6 @@ object PaymentRepository {
         refund_id, payment_id, tax_amount, fee_amount, merchant_amount, refunded_at, recorded_at, fingerprint
     """
 
-    /** Inserts the payment unless its id exists. Returns false on a duplicate id (concurrent inserts wait for each other). */
     fun insertPayment(conn: Connection, p: Payment, fingerprint: String): Boolean =
         conn.prepareStatement(
             """
@@ -47,7 +44,6 @@ object PaymentRepository {
             st.executeUpdate() == 1
         }
 
-    /** [forUpdate] row-locks the payment: refunds of one payment are serialised on it. */
     fun findPayment(conn: Connection, paymentId: String, forUpdate: Boolean = false): Stored<Payment>? =
         conn.prepareStatement(
             "SELECT $PAYMENT_COLUMNS FROM payments WHERE payment_id = ?" + if (forUpdate) " FOR UPDATE" else "",
@@ -87,10 +83,6 @@ object PaymentRepository {
             st.executeQuery().use { rs -> buildList { while (rs.next()) add(rs.toRefund()) } }
         }
 
-    /**
-     * A page of payments, latest capture first, optionally for one merchant and/or one status. Returns (total, page).
-     * The status is derived from the refunded amount, the same way [PaymentDetails.status] does.
-     */
     fun page(conn: Connection, merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): Pair<Long, List<PaymentDetails>> {
         val base = """
             SELECT p.*, CASE WHEN COALESCE(r.refunded, 0) = 0 THEN 'CAPTURED'

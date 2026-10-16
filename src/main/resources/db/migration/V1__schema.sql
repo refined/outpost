@@ -1,22 +1,15 @@
--- Double-entry ledger (schema `ledger`) and the business records it is posted from (schema `public`).
---
--- Invariants enforced by the database, not only by the code:
---   * every journal entry balances (sum of signed postings = 0) and uses a single currency — checked at commit;
---   * history is append-only: UPDATE and DELETE on entries, postings, payments and refunds are rejected;
---   * an account's identity never changes; only its running `balance` is updated, in the same transaction as
---     the postings that move it.
---   (TRUNCATE is not blocked; it is an admin operation, used by tests to reset state.)
+-- Invariants enforced here, not only in code: every journal entry balances in one currency (checked at commit);
+-- entries, postings, payments and refunds are append-only; an account can change only its running balance.
+-- TRUNCATE is not blocked: tests use it to reset state.
 
 CREATE SCHEMA ledger;
 
--- ─── Ledger ─────────────────────────────────────────────────────────────────────────────────────────────
-
 CREATE TABLE ledger.accounts (
     id          BIGSERIAL PRIMARY KEY,
-    code        TEXT    NOT NULL,                 -- e.g. merchant_payable:m_123
-    currency    CHAR(3) NOT NULL,                 -- ISO 4217; one account per (code, currency)
+    code        TEXT    NOT NULL,
+    currency    CHAR(3) NOT NULL,
     normal_side TEXT    NOT NULL CHECK (normal_side IN ('DEBIT', 'CREDIT')),
-    balance     BIGINT  NOT NULL DEFAULT 0,       -- running Σ of this account's postings (debit > 0)
+    balance     BIGINT  NOT NULL DEFAULT 0,       -- running sum of the postings, debit > 0
     UNIQUE (code, currency)
 );
 
@@ -25,13 +18,26 @@ CREATE TABLE ledger.journal_entries (
     kind         TEXT        NOT NULL CHECK (kind IN ('CAPTURE', 'REFUND')),
     payment_id   TEXT        NOT NULL,
     refund_id    TEXT,
-    effective_at TIMESTAMPTZ NOT NULL,             -- when it happened (event time); reports filter on this
-    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now() -- when we learned about it
+    effective_at TIMESTAMPTZ NOT NULL,             -- event time; asOf reports filter on it
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Entry ids are not in commit order, so snapshots cut by xid: all xids below pg_snapshot_xmin have finished.
+    txid         XID8        NOT NULL DEFAULT pg_current_xact_id()
 );
 CREATE INDEX journal_entries_payment_idx ON ledger.journal_entries (payment_id);
 CREATE INDEX journal_entries_effective_idx ON ledger.journal_entries (effective_at);
+CREATE INDEX journal_entries_txid_idx ON ledger.journal_entries (txid);
 
--- Signed amounts in minor units: debit > 0, credit < 0.
+CREATE TABLE ledger.balance_snapshots (
+    account_id BIGINT PRIMARY KEY REFERENCES ledger.accounts (id),
+    balance    BIGINT NOT NULL
+);
+CREATE TABLE ledger.snapshot_state (
+    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    boundary     XID8        NOT NULL,             -- entries with txid < boundary are in the snapshot
+    refreshed_at TIMESTAMPTZ NOT NULL
+);
+INSERT INTO ledger.snapshot_state (boundary, refreshed_at) VALUES ('0', now());
+
 CREATE TABLE ledger.postings (
     id         BIGSERIAL PRIMARY KEY,
     entry_id   BIGINT NOT NULL REFERENCES ledger.journal_entries (id),
@@ -95,7 +101,6 @@ BEGIN
 END
 $$;
 
--- Accounts: the running balance is the only mutable column.
 CREATE FUNCTION ledger.only_balance_changes() RETURNS trigger
     LANGUAGE plpgsql AS
 $$
@@ -116,21 +121,16 @@ CREATE TRIGGER journal_entries_append_only BEFORE UPDATE OR DELETE ON ledger.jou
 CREATE TRIGGER postings_append_only BEFORE UPDATE OR DELETE ON ledger.postings
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();
 
--- Accounts of the TigerBeetle engine (LEDGER_ENGINE=TIGERBEETLE). TigerBeetle keeps balances under 128-bit ids;
--- this maps them back to account codes so that reports can list them. Unused with the Postgres engine.
 CREATE TABLE ledger.tb_accounts (
-    id          NUMERIC(39) PRIMARY KEY,          -- the TigerBeetle account id (u128)
+    id          NUMERIC(39) PRIMARY KEY,          -- u128
     code        TEXT    NOT NULL,
     currency    CHAR(3) NOT NULL,
     normal_side TEXT    NOT NULL CHECK (normal_side IN ('DEBIT', 'CREDIT')),
     UNIQUE (code, currency)
 );
 
--- ─── Business records ───────────────────────────────────────────────────────────────────────────────────
-
--- A captured payment with the split and the terms (rates, refund policy) snapshotted at capture time.
 CREATE TABLE payments (
-    payment_id        TEXT PRIMARY KEY,           -- external id (PSP / checkout): the idempotency key
+    payment_id        TEXT PRIMARY KEY,           -- external event id = idempotency key
     merchant_id       TEXT          NOT NULL,
     currency          CHAR(3)       NOT NULL,
     amount            BIGINT        NOT NULL CHECK (amount > 0),
@@ -143,14 +143,14 @@ CREATE TABLE payments (
     refund_fee_policy TEXT          NOT NULL CHECK (refund_fee_policy IN ('MOR_KEEPS_FEE', 'MOR_RETURNS_FEE')),
     captured_at       TIMESTAMPTZ   NOT NULL,
     recorded_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
-    fingerprint       TEXT          NOT NULL,     -- hash of the request, to tell a replay from a conflict
+    fingerprint       TEXT          NOT NULL,     -- request hash: replay vs conflict
     CHECK (tax_amount + fee_amount + merchant_amount = amount)
 );
 CREATE INDEX payments_merchant_time_idx ON payments (merchant_id, captured_at);
 CREATE INDEX payments_time_idx ON payments (captured_at);
 
 CREATE TABLE refunds (
-    refund_id       TEXT PRIMARY KEY,             -- external id: the idempotency key
+    refund_id       TEXT PRIMARY KEY,             -- external event id = idempotency key
     payment_id      TEXT        NOT NULL REFERENCES payments (payment_id),
     amount          BIGINT      NOT NULL CHECK (amount > 0),
     tax_amount      BIGINT      NOT NULL CHECK (tax_amount >= 0),

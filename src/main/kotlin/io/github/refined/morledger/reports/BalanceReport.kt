@@ -10,12 +10,10 @@ import javax.sql.DataSource
 
 data class TaxOwed(val jurisdiction: String, val currency: String, val amountOwed: Long)
 
-/** What the MoR owes the merchant; negative when the merchant owes the MoR (e.g. refunds with a kept fee). */
 data class MerchantBalance(val merchantId: String, val currency: String, val balance: Long)
 
 data class MorPosition(val currency: String, val feeRevenue: Long, val pspClearing: Long)
 
-/** Σ of all postings per currency; must be zero in a double-entry ledger. */
 data class Integrity(val balanced: Boolean, val unbalancedCurrencies: List<String>)
 
 data class Balances(
@@ -26,13 +24,11 @@ data class Balances(
     val integrity: Integrity,
 )
 
-/** The balances report reads the ledger engine: current balances, or balances as of a past instant. */
 class BalanceReport(private val dataSource: DataSource, private val ledger: LedgerEngine = PostgresLedger()) {
     fun build(asOf: Instant? = null, currency: String? = null): Balances =
         fromLedger(dataSource.transaction { ledger.balances(it, asOf, currency) }, asOf)
 
     companion object {
-        /** Folds hot-account shards (`fee_revenue#3`) back into their account before reporting. */
         fun fromLedger(rawBalances: List<AccountBalance>, asOf: Instant?): Balances {
             val balances = rawBalances
                 .groupBy { it.account.copy(code = ChartOfAccounts.baseCode(it.account.code)) }

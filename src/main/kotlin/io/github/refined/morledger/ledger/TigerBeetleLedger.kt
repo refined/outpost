@@ -17,27 +17,9 @@ import java.time.Instant
 import java.util.Currency
 import java.util.concurrent.ConcurrentHashMap
 
-/**
- * The ledger on TigerBeetle (`LEDGER_ENGINE=TIGERBEETLE`), behind the same [LedgerEngine] interface.
- *
- * Mapping:
- * - an account is a TigerBeetle account; its id is a hash of (code, currency), and its `ledger` is the currency's
- *   ISO 4217 numeric code, so TigerBeetle itself refuses transfers between currencies;
- * - a journal entry becomes **linked transfers** (all or nothing): each credit line is paired with a debit line;
- * - transfer ids are derived from the event (kind, payment, refund, position), so a retried event gets `exists`
- *   back instead of posting twice.
- *
- * **Dual write.** Payments and refunds stay in Postgres. [post] sends the transfers to TigerBeetle *inside* the Postgres
- * transaction, before it commits. If the commit then fails, TigerBeetle has the transfers but Postgres has no
- * payment; the PSP retries the event, Postgres inserts the payment again, and TigerBeetle answers `exists`. An event
- * that is never retried leaves orphan transfers, which the merchant breakdown's ledger check surfaces. Avoiding
- * this window is the main reason the default engine is Postgres (see docs/ledger-comparison.md).
- *
- * Not supported: historical (`asOf`) balances (they need TigerBeetle's account history flag) and journal browsing.
- */
+// Dual write: transfers go out before the Postgres commit; a failed commit leaves them until the event is retried.
 class TigerBeetleLedger(
     private val client: Client,
-    /** Salt for account and transfer ids. Tests use a fresh one to stay isolated inside a shared TigerBeetle. */
     private val namespace: String = "",
 ) : LedgerEngine {
     override val description = "tigerbeetle"
@@ -63,8 +45,7 @@ class TigerBeetleLedger(
         }
         val results = client.createTransfers(batch)
         val statuses = buildList { while (results.next()) add(results.status) }
-        // A linked chain is atomic. On a retry the first transfer answers `Exists` and fails the chain, so the others
-        // answer `LinkedEventFailed`: that combination means "already posted". Anything else is a real rejection.
+        // On a retry the first transfer answers `Exists` and the rest of the chain `LinkedEventFailed`: already posted.
         val posted = statuses.all { it == CreateTransferStatus.Created }
         val alreadyPosted = CreateTransferStatus.Exists in statuses &&
             statuses.all { it == CreateTransferStatus.Exists || it == CreateTransferStatus.LinkedEventFailed }
@@ -91,14 +72,12 @@ class TigerBeetleLedger(
         }.sortedWith(compareBy({ it.account.currency }, { it.account.code }))
     }
 
-    /** TigerBeetle enforces double entry itself; the cross-check against the business records is the merchant ledger check. */
     override fun verify(conn: Connection): List<BalanceMismatch> = emptyList()
 
     override fun entries(conn: Connection, paymentId: String?, accountCode: String?, limit: Int, beforeId: Long?): List<JournalEntry> =
         throw UnsupportedLedgerOperation("the journal lives in TigerBeetle; browsing it is not implemented in this service")
 
     private fun ensureAccounts(conn: Connection, accounts: List<Account>, ledger: Int) {
-        // The registry row is (re)inserted in the caller's transaction, so it commits together with the business record.
         conn.prepareStatement(
             "INSERT INTO ledger.tb_accounts (id, code, currency, normal_side) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
         ).use { st ->
@@ -141,7 +120,6 @@ class TigerBeetleLedger(
                 buildMap {
                     while (rs.next()) {
                         val account = Account(rs.getString(2), rs.getString(3), NormalSide.valueOf(rs.getString(4)))
-                        // Rows from another namespace (tests) are skipped: their ids don't match this engine's hashing.
                         val id = rs.getBigDecimal(1).toBigIntegerExact()
                         if (id == accountId(account)) put(id, account)
                     }
@@ -165,7 +143,6 @@ class TigerBeetleLedger(
             return TigerBeetleLedger(Client(UInt128.asBytes(clusterId), arrayOf("$ip:$port")))
         }
 
-        /** Pairs every credit line with debit lines until both are used up: the transfers of one entry. */
         internal fun pairUp(lines: List<Posting>): List<Triple<Account, Account, Long>> {
             val debits = lines.filter { it.amount > 0 }.map { it.account to it.amount }.toMutableList()
             val credits = lines.filter { it.amount < 0 }.map { it.account to -it.amount }.toMutableList()
@@ -185,7 +162,6 @@ class TigerBeetleLedger(
 
         private fun ledgerOf(currency: String): Int = Currency.getInstance(currency).numericCode
 
-        /** A stable, non-zero 128-bit id: the first 16 bytes of SHA-256 over the parts. */
         private fun id128(vararg parts: String): BigInteger {
             val digest = MessageDigest.getInstance("SHA-256").digest(parts.joinToString("\u0000").toByteArray())
             val id = BigInteger(1, digest.copyOfRange(0, 16))

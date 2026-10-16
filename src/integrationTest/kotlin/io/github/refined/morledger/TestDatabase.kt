@@ -3,13 +3,12 @@ package io.github.refined.morledger
 import com.zaxxer.hikari.HikariDataSource
 import io.github.refined.morledger.db.Database
 import io.github.refined.morledger.db.transaction
-import io.github.refined.morledger.ledger.PostgresLedger
 import org.testcontainers.postgresql.PostgreSQLContainer
 
 /**
  * One migrated Postgres per test JVM, shared by all test classes.
  *
- * - `TEST_DB_URL` set: use that database (CI on macOS/Windows runners, the compose `test` service). Its schema is
+ * - `TEST_DB_URL` set: use that database (the compose `test` service). Its schema is
  *   dropped and re-created first, so a database left over from an older schema can't break the run.
  *   Never point it at a database you care about.
  * - Otherwise: start a throwaway Postgres via Testcontainers; Ryuk removes it when the JVM exits.
@@ -34,19 +33,14 @@ object TestDatabase {
         ds
     }
 
-    /** Fails if any account's stored running balance differs from the sum of its postings. */
-    fun assertLedgerConsistent() {
-        val mismatches = dataSource.transaction { PostgresLedger().verify(it) }
-        check(mismatches.isEmpty()) { "stored balances differ from postings: $mismatches" }
-    }
-
     /** Empties all business and ledger tables. TRUNCATE is deliberately not blocked by the append-only triggers. */
     fun reset() {
         dataSource.transaction { conn ->
             conn.createStatement().use {
                 it.execute(
-                    "TRUNCATE refunds, payments, ledger.postings, ledger.journal_entries, ledger.accounts, ledger.tb_accounts RESTART IDENTITY",
+                    "TRUNCATE refunds, payments, ledger.postings, ledger.journal_entries, ledger.balance_snapshots, ledger.accounts, ledger.tb_accounts RESTART IDENTITY",
                 )
+                it.execute("UPDATE ledger.snapshot_state SET boundary = '0', refreshed_at = now()")
             }
         }
     }

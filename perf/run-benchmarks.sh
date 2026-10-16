@@ -15,7 +15,7 @@ OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
 BASE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
 COMPOSE=("${BASE[@]}")
-RATES=(200 400 600 800 1000 1300 1600 2000 2500 3000)
+RATES=(200 250 300 350 400 500 600 800 1000)
 STEP=20s
 
 # name | engine settings | resource split (app / postgres / tigerbeetle), totalling 2 CPUs and 3072 MB
@@ -24,6 +24,8 @@ variant_env() {
     pg-stored)   echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=1 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
     pg-computed) echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=COMPUTED HOT_ACCOUNT_SHARDS=1 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
     pg-sharded)  echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=8 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
+    pg-snapshot) echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=SNAPSHOT HOT_ACCOUNT_SHARDS=1 BALANCE_REFRESH_MS=1000 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
+    pg-batched)  echo "LEDGER_ENGINE=POSTGRES BALANCE_MODE=BATCHED HOT_ACCOUNT_SHARDS=1 BALANCE_REFRESH_MS=1000 APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB" ;;
     tigerbeetle) echo "LEDGER_ENGINE=TIGERBEETLE BALANCE_MODE=STORED HOT_ACCOUNT_SHARDS=1 APP_CPUS=0.8 APP_MEM=384M PG_CPUS=0.4 PG_MEM=256M PG_SHARED_BUFFERS=64MB TB_CPUS=0.8 TB_MEM=2432M" ;;
     *) echo "unknown variant $1" >&2; exit 1 ;;
   esac
@@ -54,7 +56,7 @@ run_variant() {
   # Read latency of the balances report at two data sizes (closed-loop seed = bulk ingest throughput).
   SCRIPT=seed.js k6 -e PAYMENTS=10000 -e PREFIX=pre -e OUT="$STAMP/$VARIANT-seed-10k"
   SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-10k"
-  SCRIPT=seed.js k6 -e PAYMENTS=100000 -e PREFIX=pre -e OUT="$STAMP/$VARIANT-seed-100k"
+  SCRIPT=seed.js k6 -e PAYMENTS=90000 -e PREFIX=pre2 -e OUT="$STAMP/$VARIANT-seed-100k"
   SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-100k"
 
   # Throughput ladders: raise the arrival rate until a step no longer holds (keeps up, p95 < 250 ms, < 1% errors).
@@ -65,7 +67,8 @@ run_variant() {
     done
   done
 
-  # The books must still balance after all of it.
+  # The books must still balance after all of it (a batched snapshot first catches up).
+  sleep 3
   {
     echo "{\"variant\":\"$VARIANT\",\"verify\":$(curl -s http://127.0.0.1:8090/v1/ledger/verify),"
     echo "\"integrity\":$(curl -s http://127.0.0.1:8090/v1/reports/balances | grep -o '"integrity":{[^}]*}' | sed 's/"integrity"://'),"
@@ -106,12 +109,24 @@ summarise() {
       echo "| $v | $(field "$OUTDIR/$v-seed-100k.json" paymentsPerSecond) | $(field "$OUTDIR/$v-report-10k.json" p50) / $(field "$OUTDIR/$v-report-10k.json" p95) ms | $(field "$OUTDIR/$v-report-100k.json" p50) / $(field "$OUTDIR/$v-report-100k.json" p95) ms |"
     done
     echo
+    echo "## Freshness: how stale a balance read was, worst step per variant"
+    echo
+    echo "| Variant | read lag max | entries waiting for the snapshot, max |"
+    echo "|---|---|---|"
+    for v in "$@"; do
+      lag=0; pend=0
+      for f in "$OUTDIR"/"$v"-capture-*.json "$OUTDIR"/"$v"-hot-*.json "$OUTDIR"/"$v"-mixed-*.json; do [ -f "$f" ] || continue
+        l=$(field "$f" readLagMax); p=$(field "$f" pendingMax)
+        [ "${l:-0}" -gt "$lag" ] && lag=$l; [ "${p:-0}" -gt "$pend" ] && pend=$p; done
+      echo "| $v | $lag ms | $pend |"
+    done
+    echo
     echo "## All steps"
     echo
-    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Holds |"
-    echo "|---|---|---|---|---|---|---|---|---|---|"
+    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Read lag p95 / max | Pending max | Holds |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
     for v in "$@"; do for s in capture hot mixed; do for r in "${RATES[@]}"; do f="$OUTDIR/$v-$s-$r.json"; [ -f "$f" ] || continue
-      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(field "$f" holds) |"
+      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(field "$f" readLagP95) / $(field "$f" readLagMax) ms | $(field "$f" pendingMax) | $(field "$f" holds) |"
     done; done; done
     echo
     echo "## Consistency after each run"
@@ -122,7 +137,7 @@ summarise() {
 }
 
 VARIANTS=("$@")
-[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-computed pg-sharded tigerbeetle)
+[ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=(pg-stored pg-computed pg-snapshot pg-batched pg-sharded tigerbeetle)
 for v in "${VARIANTS[@]}"; do run_variant "$v"; done
 summarise "${VARIANTS[@]}"
 "${BASE[@]}" --profile tb down >/dev/null 2>&1 || true

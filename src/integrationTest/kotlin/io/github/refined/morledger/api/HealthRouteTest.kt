@@ -1,20 +1,15 @@
-package io.github.refined.morledger
+package io.github.refined.morledger.api
 
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
-import io.ktor.server.testing.testApplication
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class HealthRouteTest {
-    private val dataSource = TestDatabase.dataSource
-
     @Test
-    fun `health checks the database`() = testApplication {
-        application { module(dataSource) }
-
+    fun `health checks the database`() = api {
         val response = client.get("/health")
 
         assertEquals(HttpStatusCode.OK, response.status)
@@ -22,8 +17,7 @@ class HealthRouteTest {
     }
 
     @Test
-    fun `demo console, API docs and spec are served`() = testApplication {
-        application { module(dataSource) }
+    fun `demo console, API docs and spec are served`() = api {
         val noRedirects = createClient { followRedirects = false }
 
         assertEquals("/ui/", noRedirects.get("/").headers["Location"])
@@ -34,9 +28,7 @@ class HealthRouteTest {
     }
 
     @Test
-    fun `unknown route is 404`() = testApplication {
-        application { module(dataSource) }
-
+    fun `unknown route is 404`() = api {
         assertEquals(HttpStatusCode.NotFound, client.get("/nope").status)
     }
 }

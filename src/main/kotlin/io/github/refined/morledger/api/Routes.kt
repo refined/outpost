@@ -43,6 +43,9 @@ data class MismatchDto(val code: String, val currency: String, val stored: Long,
 @Serializable
 data class VerifyResponse(val ok: Boolean, val mismatches: List<MismatchDto>)
 
+@Serializable
+data class LagResponse(val pendingEntries: Long, val oldestPendingAgeMs: Long, val readLagMs: Long, val refreshedAt: String?)
+
 fun Application.routes(
     dataSource: DataSource,
     payments: PaymentService,
@@ -51,9 +54,7 @@ fun Application.routes(
     analytics: Analytics,
 ) {
     routing {
-        // Demo console, API docs and the OpenAPI spec (static files from src/main/resources/web).
         get("/") { call.respondRedirect("/ui/") }
-        // no-cache: the browser revalidates, so a rebuilt console is picked up without a hard reload.
         staticResources("/ui", "web/ui") { modify { _, call -> call.response.header(HttpHeaders.CacheControl, "no-cache") } }
         staticResources("/docs", "web/docs") { modify { _, call -> call.response.header(HttpHeaders.CacheControl, "no-cache") } }
         get("/openapi.yaml") {
@@ -67,7 +68,6 @@ fun Application.routes(
         }
 
         route("/v1") {
-            // Capture: record that a customer payment was captured for a merchant (e.g. from a PSP webhook).
             post("/payments") {
                 val req = call.receive<CaptureRequest>()
                 val result = payments.capture(
@@ -84,7 +84,6 @@ fun Application.routes(
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toDto())
             }
 
-            // Latest capture first; filters: merchantId, status (CAPTURED | PARTIALLY_REFUNDED | REFUNDED); offset pagination.
             get("/payments") {
                 val q = call.request.queryParameters
                 val status = q["status"]?.let { s ->
@@ -104,7 +103,6 @@ fun Application.routes(
                 call.respond(payments.get(call.parameters["paymentId"]!!).toDto())
             }
 
-            // Refund: full when `amount` is omitted, partial otherwise.
             post("/payments/{paymentId}/refunds") {
                 val req = call.receive<RefundRequest>()
                 val result = payments.refund(
@@ -124,7 +122,6 @@ fun Application.routes(
                 call.respond(reports.build(asOf, currency).toResponse())
             }
 
-            // Journal, most recent first. Filters: paymentId, merchantId (entries touching its account); page with `before`.
             get("/journal") {
                 val q = call.request.queryParameters
                 val accountCode = q["merchantId"]?.let { ChartOfAccounts.MERCHANT_PAYABLE_PREFIX + it }
@@ -134,7 +131,6 @@ fun Application.routes(
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
 
-            // The ledger itself: every account (shards included) and a reconciliation of stored balances vs postings.
             get("/ledger/accounts") {
                 val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
                 val accounts = dataSource.transaction { ledger.balances(it, null, currency) }
@@ -144,6 +140,11 @@ fun Application.routes(
             get("/ledger/verify") {
                 val mismatches = dataSource.transaction { ledger.verify(it) }
                 call.respond(VerifyResponse(mismatches.isEmpty(), mismatches.map { MismatchDto(it.account.code, it.account.currency, it.stored, it.fromPostings) }))
+            }
+
+            get("/ledger/lag") {
+                val lag = dataSource.transaction { ledger.lag(it) }
+                call.respond(LagResponse(lag.pendingEntries, lag.oldestPendingAgeMs, lag.readLagMs, lag.refreshedAt?.toString()))
             }
 
             analyticsRoutes(analytics)
