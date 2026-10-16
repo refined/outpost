@@ -3,6 +3,7 @@
 #
 #   docker compose up -d --build --wait            # Postgres + service -> http://localhost:8090/ui/
 #   docker compose --profile test run --rm test    # full test suite in a JDK container, against its own Postgres
+#   docker compose --profile tools run --rm k6 run seed.js   # demo dataset (~100k payments)
 #   docker compose --profile test down             # stop everything, incl. the test database (-v also drops data)
 
 services:
@@ -68,6 +69,20 @@ services:
       - gradle-cache:/home/gradle/.gradle
     depends_on:
       postgres-test:
+        condition: service_healthy
+
+  # ── Tools (profile "tools"): k6 for the demo dataset and the benchmarks (scripts in perf/k6). ──────────────────
+  k6:
+    profiles: [tools]
+    image: grafana/k6:2.3.0
+    working_dir: /scripts # so scripts are run by name (`k6 run seed.js`), the same in every shell
+    environment:
+      BASE_URL: http://app:8090
+    volumes:
+      - ./perf/k6:/scripts:ro
+      - ./perf/results:/results
+    depends_on:
+      app:
         condition: service_healthy
 
 volumes:

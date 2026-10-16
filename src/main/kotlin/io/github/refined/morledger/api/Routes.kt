@@ -11,10 +11,12 @@ import io.github.refined.morledger.payments.ValidationException
 import io.github.refined.morledger.reports.Analytics
 import io.github.refined.morledger.reports.BalanceReport
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.http.content.staticResources
 import io.ktor.server.request.receive
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondRedirect
 import io.ktor.server.response.respondText
@@ -27,7 +29,19 @@ import java.math.BigDecimal
 import javax.sql.DataSource
 
 @Serializable
-data class HealthResponse(val status: String)
+data class HealthResponse(val status: String, val ledger: String)
+
+@Serializable
+data class AccountDto(val code: String, val currency: String, val normalSide: String, val balance: Long)
+
+@Serializable
+data class AccountsResponse(val accounts: List<AccountDto>)
+
+@Serializable
+data class MismatchDto(val code: String, val currency: String, val stored: Long, val fromPostings: Long)
+
+@Serializable
+data class VerifyResponse(val ok: Boolean, val mismatches: List<MismatchDto>)
 
 fun Application.routes(
     dataSource: DataSource,
@@ -39,8 +53,9 @@ fun Application.routes(
     routing {
         // Demo console, API docs and the OpenAPI spec (static files from src/main/resources/web).
         get("/") { call.respondRedirect("/ui/") }
-        staticResources("/ui", "web/ui")
-        staticResources("/docs", "web/docs")
+        // no-cache: the browser revalidates, so a rebuilt console is picked up without a hard reload.
+        staticResources("/ui", "web/ui") { modify { _, call -> call.response.header(HttpHeaders.CacheControl, "no-cache") } }
+        staticResources("/docs", "web/docs") { modify { _, call -> call.response.header(HttpHeaders.CacheControl, "no-cache") } }
         get("/openapi.yaml") {
             val spec = Application::class.java.classLoader.getResource("web/openapi.yaml")!!.readText()
             call.respondText(spec, ContentType.parse("application/yaml"))
@@ -48,7 +63,7 @@ fun Application.routes(
 
         get("/health") {
             dataSource.transaction { conn -> conn.createStatement().use { it.execute("SELECT 1") } }
-            call.respond(HealthResponse("ok"))
+            call.respond(HealthResponse("ok", ledger.description))
         }
 
         route("/v1") {
@@ -117,6 +132,18 @@ fun Application.routes(
                 val limit = parseLimit(q["limit"], default = 100)
                 val entries = dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
+            }
+
+            // The ledger itself: every account (shards included) and a reconciliation of stored balances vs postings.
+            get("/ledger/accounts") {
+                val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
+                val accounts = dataSource.transaction { ledger.balances(it, null, currency) }
+                call.respond(AccountsResponse(accounts.map { AccountDto(it.account.code, it.account.currency, it.account.normalSide.name, it.balance) }))
+            }
+
+            get("/ledger/verify") {
+                val mismatches = dataSource.transaction { ledger.verify(it) }
+                call.respond(VerifyResponse(mismatches.isEmpty(), mismatches.map { MismatchDto(it.account.code, it.account.currency, it.stored, it.fromPostings) }))
             }
 
             analyticsRoutes(analytics)

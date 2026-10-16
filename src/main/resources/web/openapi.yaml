@@ -122,6 +122,22 @@ paths:
       responses:
         '200': { description: Entries, content: { application/json: { schema: { $ref: '#/components/schemas/Journal' } } } }
 
+  /v1/ledger/accounts:
+    get:
+      tags: [Reports]
+      summary: Every ledger account with its current balance (hot-account shards listed separately)
+      parameters:
+        - { name: currency, in: query, required: false, schema: { type: string } }
+      responses:
+        '200': { description: Accounts, content: { application/json: { schema: { type: object } } } }
+
+  /v1/ledger/verify:
+    get:
+      tags: [Reports]
+      summary: Reconciliation - accounts whose stored balance differs from the sum of their postings
+      responses:
+        '200': { description: Result, content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, mismatches: { type: array, items: { type: object } } } } } } }
+
   /v1/analytics/summary:
     get:
       tags: [Analytics]
@@ -178,7 +194,7 @@ paths:
       tags: [Ops]
       summary: Liveness and database check
       responses:
-        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok } } } } } }
+        '200': { description: OK, content: { application/json: { schema: { type: object, properties: { status: { type: string, example: ok }, ledger: { type: string, example: "postgres (balances: stored)" } } } } } }
 
 components:
   parameters:

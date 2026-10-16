@@ -20,3 +20,6 @@ out/
 .env
 .DS_Store
 Thumbs.db
+
+# Benchmark output
+/perf/results/

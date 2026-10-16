@@ -161,6 +161,20 @@ class AnalyticsApiTest {
     }
 
     @Test
+    fun `ledger accounts list every account and verify confirms stored balances`() = api {
+        client.seed()
+
+        val accounts = client.get("/v1/ledger/accounts?currency=EUR").json().getValue("accounts").jsonArray.map { it.jsonObject }
+        val acme = accounts.single { it.str("code") == "merchant_payable:acme" }
+        assertEquals(23_195, acme.long("balance"))
+        assertTrue(accounts.all { it.str("currency") == "EUR" })
+
+        val verify = client.get("/v1/ledger/verify").json()
+        assertEquals("true", verify.getValue("ok").jsonPrimitive.content)
+        assertTrue(client.get("/health").bodyAsText().contains("postgres"))
+    }
+
+    @Test
     fun `journal can be filtered by merchant and paged`() = api {
         client.seed()
 
