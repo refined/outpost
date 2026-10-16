@@ -2,7 +2,7 @@ package io.github.refined.morledger.payments
 
 import io.github.refined.morledger.TestDatabase
 import io.github.refined.morledger.db.transaction
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.PostgresLedger
 import io.github.refined.morledger.reports.BalanceReport
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -69,7 +69,7 @@ class ConcurrencyTest {
 
         assertTrue(results.all { it.isSuccess })
         assertEquals(1, results.count { it.getOrThrow().created })
-        assertEquals(1, TestDatabase.dataSource.transaction { Ledger.entries(it, "p_dup") }.size)
+        assertEquals(1, TestDatabase.dataSource.transaction { PostgresLedger().entries(it, "p_dup") }.size)
     }
 
     @Test

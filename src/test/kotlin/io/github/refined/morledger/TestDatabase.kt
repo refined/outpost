@@ -3,7 +3,7 @@ package io.github.refined.morledger
 import com.zaxxer.hikari.HikariDataSource
 import io.github.refined.morledger.db.Database
 import io.github.refined.morledger.db.transaction
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.PostgresLedger
 import org.testcontainers.postgresql.PostgreSQLContainer
 
 /**
@@ -36,7 +36,7 @@ object TestDatabase {
 
     /** Fails if any account's stored running balance differs from the sum of its postings. */
     fun assertLedgerConsistent() {
-        val mismatches = dataSource.transaction { Ledger.verify(it) }
+        val mismatches = dataSource.transaction { PostgresLedger().verify(it) }
         check(mismatches.isEmpty()) { "stored balances differ from postings: $mismatches" }
     }
 

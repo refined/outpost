@@ -1,7 +1,8 @@
 package io.github.refined.morledger.api
 
 import io.github.refined.morledger.db.transaction
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.ChartOfAccounts
+import io.github.refined.morledger.ledger.LedgerEngine
 import io.github.refined.morledger.payments.CaptureCommand
 import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.RefundCommand
@@ -28,7 +29,7 @@ import javax.sql.DataSource
 @Serializable
 data class HealthResponse(val status: String)
 
-fun Application.routes(dataSource: DataSource, payments: PaymentService, reports: BalanceReport) {
+fun Application.routes(dataSource: DataSource, payments: PaymentService, reports: BalanceReport, ledger: LedgerEngine) {
     routing {
         // Demo console, API docs and the OpenAPI spec (static files from src/main/resources/web).
         get("/") { call.respondRedirect("/ui/") }
@@ -91,10 +92,13 @@ fun Application.routes(dataSource: DataSource, payments: PaymentService, reports
                 call.respond(reports.build(asOf, currency).toResponse())
             }
 
+            // Journal, most recent first. Filters: paymentId, merchantId (entries touching its account); page with `before`.
             get("/journal") {
-                val paymentId = call.request.queryParameters["paymentId"]
-                val limit = parseLimit(call.request.queryParameters["limit"], default = 100)
-                val entries = dataSource.transaction { Ledger.entries(it, paymentId, limit) }
+                val q = call.request.queryParameters
+                val accountCode = q["merchantId"]?.let { ChartOfAccounts.MERCHANT_PAYABLE_PREFIX + it }
+                val before = q["before"]?.let { it.toLongOrNull() ?: throw ValidationException("before must be an entry id") }
+                val limit = parseLimit(q["limit"], default = 100)
+                val entries = dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
         }

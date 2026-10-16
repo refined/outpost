@@ -136,7 +136,8 @@ CREATE TABLE payments (
     fingerprint       TEXT          NOT NULL,     -- hash of the request, to tell a replay from a conflict
     CHECK (tax_amount + fee_amount + merchant_amount = amount)
 );
-CREATE INDEX payments_merchant_idx ON payments (merchant_id);
+CREATE INDEX payments_merchant_time_idx ON payments (merchant_id, captured_at);
+CREATE INDEX payments_time_idx ON payments (captured_at);
 
 CREATE TABLE refunds (
     refund_id       TEXT PRIMARY KEY,             -- external id: the idempotency key
@@ -151,6 +152,7 @@ CREATE TABLE refunds (
     CHECK (tax_amount + fee_amount + merchant_amount = amount)
 );
 CREATE INDEX refunds_payment_idx ON refunds (payment_id);
+CREATE INDEX refunds_time_idx ON refunds (refunded_at);
 
 CREATE TRIGGER payments_append_only BEFORE UPDATE OR DELETE ON payments
     FOR EACH ROW EXECUTE FUNCTION ledger.forbid_mutation();

@@ -3,7 +3,8 @@ package io.github.refined.morledger.reports
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.AccountBalance
 import io.github.refined.morledger.ledger.ChartOfAccounts
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.LedgerEngine
+import io.github.refined.morledger.ledger.PostgresLedger
 import java.time.Instant
 import javax.sql.DataSource
 
@@ -25,13 +26,17 @@ data class Balances(
     val integrity: Integrity,
 )
 
-/** The balances report reads the ledger: the stored running balances now, or sums of postings as of a past instant. */
-class BalanceReport(private val dataSource: DataSource) {
+/** The balances report reads the ledger engine: current balances, or balances as of a past instant. */
+class BalanceReport(private val dataSource: DataSource, private val ledger: LedgerEngine = PostgresLedger()) {
     fun build(asOf: Instant? = null, currency: String? = null): Balances =
-        fromLedger(dataSource.transaction { Ledger.balances(it, asOf, currency) }, asOf)
+        fromLedger(dataSource.transaction { ledger.balances(it, asOf, currency) }, asOf)
 
     companion object {
-        fun fromLedger(balances: List<AccountBalance>, asOf: Instant?): Balances {
+        /** Folds hot-account shards (`fee_revenue#3`) back into their account before reporting. */
+        fun fromLedger(rawBalances: List<AccountBalance>, asOf: Instant?): Balances {
+            val balances = rawBalances
+                .groupBy { it.account.copy(code = ChartOfAccounts.baseCode(it.account.code)) }
+                .map { (account, shards) -> AccountBalance(account, shards.sumOf { it.signedSum }) }
             val taxes = mutableListOf<TaxOwed>()
             val merchants = mutableListOf<MerchantBalance>()
             for (b in balances) {

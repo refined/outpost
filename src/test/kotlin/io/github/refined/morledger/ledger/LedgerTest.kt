@@ -13,6 +13,7 @@ import kotlin.test.assertTrue
 
 class LedgerTest {
     private val dataSource = TestDatabase.dataSource
+    private val ledger = PostgresLedger()
     private val t0 = Instant.parse("2026-10-01T10:00:00Z")
 
     @BeforeEach
@@ -28,9 +29,9 @@ class LedgerTest {
 
     @Test
     fun `posts an entry and derives balances on each account's normal side`() {
-        dataSource.transaction { Ledger.post(it, capture("p_1", Split(tax = 2100, fee = 605, merchant = 9395))) }
+        dataSource.transaction { ledger.post(it, capture("p_1", Split(tax = 2100, fee = 605, merchant = 9395))) }
 
-        val balances = dataSource.transaction { Ledger.balances(it) }.associate { it.account.code to it.balance }
+        val balances = dataSource.transaction { ledger.balances(it) }.associate { it.account.code to it.balance }
         assertEquals(
             mapOf("fee_revenue" to 605L, "merchant_payable:m_1" to 9395L, "psp_clearing" to 12100L, "tax_payable:NL" to 2100L),
             balances,
@@ -40,25 +41,25 @@ class LedgerTest {
     @Test
     fun `stored running balances equal the sum of postings`() {
         dataSource.transaction {
-            Ledger.post(it, capture("p_1", Split(tax = 2100, fee = 605, merchant = 9395)))
-            Ledger.post(it, capture("p_2", Split(tax = 1900, fee = 595, merchant = 9405)))
-            Ledger.post(it, capture("p_3", Split(tax = 0, fee = 50, merchant = 950), currency = "USD"))
+            ledger.post(it, capture("p_1", Split(tax = 2100, fee = 605, merchant = 9395)))
+            ledger.post(it, capture("p_2", Split(tax = 1900, fee = 595, merchant = 9405)))
+            ledger.post(it, capture("p_3", Split(tax = 0, fee = 50, merchant = 950), currency = "USD"))
         }
 
         TestDatabase.assertLedgerConsistent()
-        val current = dataSource.transaction { Ledger.balances(it) }
-        val summed = dataSource.transaction { Ledger.balances(it, asOf = Instant.parse("2999-01-01T00:00:00Z")) }
+        val current = dataSource.transaction { ledger.balances(it) }
+        val summed = dataSource.transaction { ledger.balances(it, asOf = Instant.parse("2999-01-01T00:00:00Z")) }
         assertEquals(summed, current)
     }
 
     @Test
     fun `verify reports a stored balance that drifted from its postings`() {
-        dataSource.transaction { Ledger.post(it, capture("p_1", Split(0, 0, 100))) }
+        dataSource.transaction { ledger.post(it, capture("p_1", Split(0, 0, 100))) }
         dataSource.transaction { conn ->
             conn.createStatement().use { it.executeUpdate("UPDATE ledger.accounts SET balance = balance + 1 WHERE code = 'psp_clearing'") }
         }
 
-        val mismatch = dataSource.transaction { Ledger.verify(it) }.single()
+        val mismatch = dataSource.transaction { ledger.verify(it) }.single()
         assertEquals("psp_clearing", mismatch.account.code)
         assertEquals(101, mismatch.stored)
         assertEquals(100, mismatch.fromPostings)
@@ -66,9 +67,9 @@ class LedgerTest {
 
     @Test
     fun `zero lines are dropped and entries are listed with their postings`() {
-        dataSource.transaction { Ledger.post(it, capture("p_1", Split(tax = 0, fee = 0, merchant = 500))) }
+        dataSource.transaction { ledger.post(it, capture("p_1", Split(tax = 0, fee = 0, merchant = 500))) }
 
-        val entries = dataSource.transaction { Ledger.entries(it, paymentId = "p_1") }
+        val entries = dataSource.transaction { ledger.entries(it, paymentId = "p_1") }
         assertEquals(1, entries.size)
         assertEquals(listOf(500L, -500L), entries.single().postings.map { it.amount })
     }
@@ -76,11 +77,11 @@ class LedgerTest {
     @Test
     fun `balances as of a date ignore later entries`() {
         dataSource.transaction {
-            Ledger.post(it, capture("p_1", Split(0, 0, 100), at = t0))
-            Ledger.post(it, capture("p_2", Split(0, 0, 50), at = t0.plusSeconds(3600)))
+            ledger.post(it, capture("p_1", Split(0, 0, 100), at = t0))
+            ledger.post(it, capture("p_2", Split(0, 0, 50), at = t0.plusSeconds(3600)))
         }
 
-        val early = dataSource.transaction { Ledger.balances(it, asOf = t0.plusSeconds(60)) }
+        val early = dataSource.transaction { ledger.balances(it, asOf = t0.plusSeconds(60)) }
         assertEquals(100L, early.single { it.account.code == "psp_clearing" }.balance)
     }
 
@@ -89,20 +90,20 @@ class LedgerTest {
         val unbalanced = capture("p_1", Split(0, 0, 100)).let {
             it.copy(postings = it.postings + Posting(ChartOfAccounts.feeRevenue("EUR"), -1))
         }
-        assertFailsWith<IllegalArgumentException> { dataSource.transaction { Ledger.post(it, unbalanced) } }
+        assertFailsWith<IllegalArgumentException> { dataSource.transaction { ledger.post(it, unbalanced) } }
 
         val mixed = NewJournalEntry(
             EntryKind.CAPTURE, "p_2", null, t0,
             listOf(Posting(ChartOfAccounts.pspClearing("EUR"), 100), Posting(ChartOfAccounts.feeRevenue("USD"), -100)),
         )
-        assertFailsWith<IllegalArgumentException> { dataSource.transaction { Ledger.post(it, mixed) } }
+        assertFailsWith<IllegalArgumentException> { dataSource.transaction { ledger.post(it, mixed) } }
     }
 
     @Test
     fun `database rejects an unbalanced entry written around the code`() {
         val error = assertFailsWith<SQLException> {
             dataSource.transaction { conn ->
-                val entryId = Ledger.post(conn, capture("p_1", Split(0, 0, 100)))
+                val entryId = ledger.post(conn, capture("p_1", Split(0, 0, 100)))!!
                 conn.createStatement().use {
                     it.executeUpdate(
                         "INSERT INTO ledger.postings (entry_id, account_id, amount) SELECT $entryId, id, 1 FROM ledger.accounts LIMIT 1",
@@ -111,12 +112,12 @@ class LedgerTest {
             }
         }
         assertTrue(error.message!!.contains("unbalanced"), error.message)
-        assertEquals(0, dataSource.transaction { Ledger.entries(it) }.size)
+        assertEquals(0, dataSource.transaction { ledger.entries(it) }.size)
     }
 
     @Test
     fun `history is append-only and accounts only change their balance`() {
-        dataSource.transaction { Ledger.post(it, capture("p_1", Split(0, 0, 100))) }
+        dataSource.transaction { ledger.post(it, capture("p_1", Split(0, 0, 100))) }
 
         for ((sql, message) in listOf(
             "UPDATE ledger.postings SET amount = amount * 2" to "append-only",
