@@ -22,7 +22,7 @@ How fast can the service take captures and refunds, and does the way balances ar
 2. **Preload and report latency:** seed 10k payments, then measure `GET /v1/reports/balances` at 20 rps; seed up to 100k payments and measure again. The seed is closed-loop (24 virtual users), so its throughput doubles as a bulk-ingest number.
 3. **Throughput ladders:** a constant arrival rate (open loop), 20 s per step. A step **holds** if it keeps up with the target (≥ 95% of the planned requests), with p95 < 250 ms and < 1% errors. There are three scenarios (listed below).
    - Rounds 1–3 climbed 200, 250, 300, 350, 400, 500… until a step failed.
-   - From round 4 a ladder starts at 400 and climbs while steps hold; if 400 fails, it steps down until one holds. A step that clearly cannot hold stops early (k6 thresholds with `abortOnFail`: too many dropped requests, or p95 or errors over the limit after 5 s).
+   - From round 4 a ladder starts at 400 and climbs while steps hold; if 400 fails, it steps down by 100 until one holds. A step that clearly cannot hold stops early (k6 thresholds with `abortOnFail`: too many dropped requests, or p95 or errors over the limit after 5 s).
 
    The scenarios:
    - `capture`: payments spread over 100 merchants and 3 currencies;

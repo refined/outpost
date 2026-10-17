@@ -7,7 +7,7 @@
 #   QUICK=1 perf/run-benchmarks.sh ...     # 10k preload only, no 100k report
 #   START_RATE=500 perf/run-benchmarks.sh  # where each ladder starts (default 400)
 #
-# A ladder starts at START_RATE and climbs while steps hold; if the first step fails, it steps down until one holds.
+# A ladder starts at START_RATE and climbs while steps hold; if the first step fails, it steps down by 100 until one holds.
 # A step that clearly cannot hold is stopped early (k6 thresholds with abortOnFail).
 #
 # Every variant also gets a profile at a fixed 300 rps: JFR (app CPU, waits on Postgres), docker stats (CPU per
@@ -22,7 +22,7 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
 COMPOSE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
-RATES=(200 250 300 350 400 500 600 800 1000 1300 1600)
+RATES=(100 200 250 300 350 400 500 600 800 1000 1300 1600)
 START_RATE=${START_RATE:-400}
 STEP_SECONDS=20
 PROFILE_RPS=300
@@ -111,7 +111,8 @@ ladder() {
   if holds "$s" "${RATES[$start]}"; then
     for ((i = start + 1; i < ${#RATES[@]}; i++)); do step "$s" "${RATES[$i]}"; holds "$s" "${RATES[$i]}" || break; done
   else
-    for ((i = start - 1; i >= 0; i--)); do step "$s" "${RATES[$i]}"; holds "$s" "${RATES[$i]}" && break; done
+    local r
+    for ((r = ${RATES[$start]} - 100; r >= 100; r -= 100)); do step "$s" "$r"; holds "$s" "$r" && break; done
   fi
 }
 
