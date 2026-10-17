@@ -24,6 +24,8 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import java.math.BigDecimal
 import javax.sql.DataSource
@@ -62,24 +64,23 @@ fun Application.routes(
         }
 
         get("/health") {
-            dataSource.transaction { conn -> conn.createStatement().use { it.execute("SELECT 1") } }
+            blocking { dataSource.transaction { conn -> conn.createStatement().use { it.execute("SELECT 1") } } }
             call.respond(HealthResponse("ok", ledgerDescription))
         }
 
         route("/v1") {
             post("/payments") {
                 val req = call.receive<CaptureRequest>()
-                val result = payments.capture(
-                    CaptureCommand(
-                        paymentId = req.paymentId,
-                        merchantId = req.merchantId,
-                        amount = req.amount,
-                        currency = req.currency,
-                        taxRate = parseRate("taxRate", req.taxRate),
-                        taxJurisdiction = req.taxJurisdiction,
-                        capturedAt = instant("capturedAt", req.capturedAt),
-                    ),
+                val cmd = CaptureCommand(
+                    paymentId = req.paymentId,
+                    merchantId = req.merchantId,
+                    amount = req.amount,
+                    currency = req.currency,
+                    taxRate = parseRate("taxRate", req.taxRate),
+                    taxJurisdiction = req.taxJurisdiction,
+                    capturedAt = instant("capturedAt", req.capturedAt),
                 )
+                val result = blocking { payments.capture(cmd) }
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toDto())
             }
 
@@ -89,36 +90,33 @@ fun Application.routes(
                     PaymentStatus.entries.firstOrNull { it.name == s }
                         ?: throw ValidationException("status must be one of ${PaymentStatus.entries.joinToString()}")
                 }
-                val (total, page) = payments.page(
-                    merchantId = q["merchantId"],
-                    status = status,
-                    limit = parseLimit(q["limit"], default = 50),
-                    offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE),
-                )
+                val limit = parseLimit(q["limit"], default = 50)
+                val offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE)
+                val (total, page) = blocking { payments.page(q["merchantId"], status, limit, offset) }
                 call.respond(PaymentsResponse(page.map { it.toDto() }, total))
             }
 
             get("/payments/{paymentId}") {
-                call.respond(payments.get(call.parameters["paymentId"]!!).toDto())
+                val paymentId = call.parameters["paymentId"]!!
+                call.respond(blocking { payments.get(paymentId) }.toDto())
             }
 
             post("/payments/{paymentId}/refunds") {
                 val req = call.receive<RefundRequest>()
-                val result = payments.refund(
-                    RefundCommand(
-                        paymentId = call.parameters["paymentId"]!!,
-                        refundId = req.refundId,
-                        amount = req.amount,
-                        refundedAt = instant("refundedAt", req.refundedAt),
-                    ),
+                val cmd = RefundCommand(
+                    paymentId = call.parameters["paymentId"]!!,
+                    refundId = req.refundId,
+                    amount = req.amount,
+                    refundedAt = instant("refundedAt", req.refundedAt),
                 )
+                val result = blocking { payments.refund(cmd) }
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toResponse())
             }
 
             get("/reports/balances") {
                 val asOf = instant("asOf", call.request.queryParameters["asOf"])
                 val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
-                call.respond(reports.build(asOf, currency).toResponse())
+                call.respond(blocking { reports.build(asOf, currency) }.toResponse())
             }
 
             get("/journal") {
@@ -126,18 +124,18 @@ fun Application.routes(
                 val accountCode = q["merchantId"]?.let { ChartOfAccounts.MERCHANT_PAYABLE_PREFIX + it }
                 val before = q["before"]?.let { it.toLongOrNull() ?: throw ValidationException("before must be an entry id") }
                 val limit = parseLimit(q["limit"], default = 100)
-                val entries = dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) }
+                val entries = blocking { dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) } }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
 
             get("/ledger/accounts") {
                 val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
-                val accounts = dataSource.transaction { ledger.balances(it, null, currency) }
+                val accounts = blocking { dataSource.transaction { ledger.balances(it, null, currency) } }
                 call.respond(AccountsResponse(accounts.map { AccountDto(it.account.code, it.account.currency, it.account.normalSide.name, it.balance) }))
             }
 
             get("/ledger/verify") {
-                val mismatches = dataSource.transaction { ledger.verify(it) }
+                val mismatches = blocking { dataSource.transaction { ledger.verify(it) } }
                 call.respond(VerifyResponse(mismatches.isEmpty(), mismatches.map { MismatchDto(it.account.code, it.account.currency, it.stored, it.fromPostings) }))
             }
 
@@ -145,6 +143,10 @@ fun Application.routes(
         }
     }
 }
+
+// JDBC blocks its thread, and Ktor has only a few request threads (sized by CPU count, 3 with a 1-CPU limit):
+// database work runs on the IO pool, so a request waiting for Postgres does not hold up the others.
+internal suspend fun <T> blocking(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
 private fun parseLimit(value: String?, default: Int): Int = value?.let {
     it.toIntOrNull()?.takeIf { n -> n in 1..1000 } ?: throw ValidationException("limit must be 1..1000")

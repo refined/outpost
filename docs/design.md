@@ -124,9 +124,9 @@ Where the brief is open, these are the decisions and why.
 - **Kept as an option: group commit (`BATCHED`).** Still synchronous and exact, but a batch of requests shares one commit and one balance update per account.
 - **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
 
-The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is not the limit: sampled lock waits were 0% at every load, even with every payment on one merchant. The ceiling (~300–400 captures/s) is the app's CPU and the per-request commit, which is why group commit (`BATCHED`) lifted it by about a third and splitting accounts gained nothing. If it ever becomes the limit, the known remedies are:
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is `STORED`'s limit once requests run concurrently: with every payment on one merchant, 84% of active Postgres backends wait on a lock at ~350 rps. Group commit (`BATCHED`) takes each balance row once per batch and held 600–800 rps. The remedies, in the order to reach for them:
 - `BALANCE_MODE=BATCHED` (in the code): group commit, one commit and one balance update per account per batch;
-- splitting a hot account into N sub-accounts (measured, then removed);
+- splitting a hot account into N sub-accounts (measured before the request-thread fix, then removed; worth revisiting);
 - moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
 
 **Natural-key idempotency instead of an `Idempotency-Key` header.**

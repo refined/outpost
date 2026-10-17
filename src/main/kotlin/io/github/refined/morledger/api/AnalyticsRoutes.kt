@@ -110,7 +110,8 @@ fun Route.analyticsRoutes(analytics: Analytics) {
             val currency = q["currency"]?.let { PaymentService.validateCurrency(it) }
             val from = instant("from", q["from"])
             val to = instant("to", q["to"])
-            call.respond(SummaryResponse(from?.toString(), to?.toString(), analytics.summary(currency, from, to).map { it.toDto() }))
+            val summary = blocking { analytics.summary(currency, from, to) }
+            call.respond(SummaryResponse(from?.toString(), to?.toString(), summary.map { it.toDto() }))
         }
 
         get("/timeseries") {
@@ -118,25 +119,26 @@ fun Route.analyticsRoutes(analytics: Analytics) {
             val currency = PaymentService.validateCurrency(q["currency"] ?: throw ValidationException("currency is required"))
             val bucket = Analytics.parseBucket(q["bucket"])
             val merchantId = q["merchantId"]
-            val points = analytics.timeseries(currency, merchantId, bucket, instant("from", q["from"]), instant("to", q["to"]))
+            val from = instant("from", q["from"])
+            val to = instant("to", q["to"])
+            val points = blocking { analytics.timeseries(currency, merchantId, bucket, from, to) }
             call.respond(TimeseriesResponse(currency, merchantId, bucket.name.lowercase(), points.map { it.toDto() }))
         }
 
         get("/merchants") {
             val q = call.request.queryParameters
-            val page = analytics.merchants(
-                currency = q["currency"]?.let { PaymentService.validateCurrency(it) },
-                search = q["q"]?.takeIf { it.isNotBlank() },
-                sort = Analytics.parseSort(q["sort"]),
-                descending = q["order"] != "asc",
-                limit = intParam("limit", q["limit"], default = 50, range = 1..500),
-                offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE),
-            )
+            val currency = q["currency"]?.let { PaymentService.validateCurrency(it) }
+            val search = q["q"]?.takeIf { it.isNotBlank() }
+            val sort = Analytics.parseSort(q["sort"])
+            val limit = intParam("limit", q["limit"], default = 50, range = 1..500)
+            val offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE)
+            val page = blocking { analytics.merchants(currency, search, sort, q["order"] != "asc", limit, offset) }
             call.respond(MerchantPageResponse(page.total, page.rows.map { it.toDto() }))
         }
 
         get("/merchants/{merchantId}") {
-            val detail = analytics.merchant(call.parameters["merchantId"]!!)
+            val merchantId = call.parameters["merchantId"]!!
+            val detail = blocking { analytics.merchant(merchantId) }
             call.respond(
                 MerchantDetailResponse(
                     merchantId = detail.merchantId,

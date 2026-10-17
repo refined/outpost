@@ -1,14 +1,16 @@
 # Performance: ledger variants under one budget
 
-How fast can the service take captures and refunds, and does the way balances are kept change that? Everything below ran on the same code, data and resource budget, in two rounds:
+How fast can the service take captures and refunds, and does the way balances are kept change that? Everything below ran on the same code, data and resource budget, in three rounds, newest first:
 
-1. **Round 2:** the two modes in the code, `STORED` (default) and `BATCHED` (group commit), with lock and IO waits sampled from Postgres.
-2. **Round 1:** six earlier variants. Four were removed afterwards; their code is at commit `0ffcf3f`.
+1. **Round 3:** the two modes in the code after profiling found the real limit: database work blocking Ktor's 3 request threads. Fixed with an IO dispatcher.
+2. **Round 2:** `STORED` (default) and `BATCHED` (group commit), with lock and IO waits sampled from Postgres; still limited by those 3 threads.
+3. **Round 1:** six earlier variants. Four were removed afterwards; their code is at commit `0ffcf3f`.
 
 ## Setup
 
 - **Budget:** 2 CPUs and 3 GB for the whole system under test, set with Docker limits ([`perf/compose.limits.yml`](../perf/compose.limits.yml)): app 1.0 CPU / 1280 MB, Postgres 1.0 CPU / 1792 MB (`shared_buffers` 448 MB). A limit is a CPU-time quota (cgroups), not pinned cores. The load generator runs outside the limit.
 - **Host:** Docker Desktop 29.1.3 on Windows 11, a 16-CPU / 16 GB VM.
+  - **Round 3** ran next to the (mostly idle) sharetravel containers.
   - **Round 2** ran with no other containers.
   - **Round 1** ran next to other projects' containers.
   - Treat differences under ~50 rps as noise. `STORED`'s capture limit came out at 200–400, 400 and 300 rps in three runs.
@@ -30,6 +32,47 @@ How fast can the service take captures and refunds, and does the way balances ar
 - It runs from one Docker image with no build step.
 - Its arrival-rate executor starts requests on schedule even when the service slows down, so latency is not hidden by coordinated omission.
 - The Kotlin-native equivalent is Gatling (Java/Kotlin DSL, Gradle plugin). A home-made loop on coroutines would measure the wrong thing.
+
+## Round 3: database work off the request threads
+
+Run `20261017-133224`; the sharetravel containers were running next to it, mostly idle.
+
+**What profiling found.** A JFR recording of `STORED` at 280 rps, together with `pg_stat_statements`, showed that neither CPU was busy: the JVM used ~0.16 CPU and Postgres's SQL ~0.1 CPU.
+- With a 1-CPU limit the JVM sees one core (`effectiveCpuCount = 1`), so Ktor starts only **3 request threads**.
+- Every handler called blocking JDBC on those threads, so at most 3 requests were in flight, whatever the Hikari pool size.
+- Of the time those threads spent waiting on the database:
+
+  | Share | Where | Why |
+  |---|---|---|
+  | 56% | `commit` | WAL flush, plus the deferred balance check |
+  | 15% | `Ledger.post` | the entry and its postings |
+  | 12% | `insertPayment` | the payment row |
+  | 11% | re-reading the payment | to build the response |
+  | 7% | balance `UPDATE`s | |
+
+**The fix.** Route handlers now run database work under `withContext(Dispatchers.IO)` (`blocking { }` in [`api/Routes.kt`](../src/main/kotlin/io/github/refined/morledger/api/Routes.kt)), so a request waiting for Postgres no longer holds a request thread. Concurrency is now bounded by the connection pool (10), not by 3 threads.
+
+**Highest holding rate:**
+
+| Variant | capture (100 merchants) | hot (1 merchant) | mixed (85/10/5) | seed: payments/s |
+|---|---|---|---|---|
+| pg-stored, round 2 | 299/s | 299/s | 300/s | 271 |
+| **pg-stored, round 3** | **400/s** (p95 5 ms) | **300/s** (p95 4 ms) | **500/s** (p95 7 ms) | **415** |
+| pg-batched-100, round 2 | 400/s | 400/s | 400/s | 314 |
+| **pg-batched-100, round 3** | **599/s** (p95 30 ms) | **794/s** (p95 216 ms) | **600/s** (p95 34 ms) | **470** |
+
+Lock / IO waits at the saturating step, `STORED`: 68% / 15% on capture at 500 rps, **84% / 5% on hot at 350 rps**, 77% / 7% on mixed at 600 rps. `BATCHED` stayed at 0% lock everywhere.
+
+**What it shows:**
+- **With real concurrency, the hot-account lock *is* `STORED`'s bottleneck.** Once 10 transactions run at once, they queue on the row locks of `psp_clearing`, `fee_revenue`, `tax_payable` and, with one merchant, `merchant_payable`. Near saturation 70–84% of active backends wait on a lock, and the one-merchant scenario saturates first, at ~300 rps. Rounds 1 and 2 never got there, because 3 request threads could not create the contention.
+- **Group commit removes that contention.** One writer takes each balance row once per batch, so lock waits stay at 0%. It reached 600–800 rps, 1.5–2.6× `STORED` and the best single-merchant result of all variants.
+- **Bulk ingest rose too:** stored 271 → 415, batched 314 → 470 payments/s.
+- **This is what makes sharding meaningful again.** With measured lock waits on `STORED`, splitting hot accounts (merchant rows included) is now a real alternative to group commit. Group commit already removes the waits without changing the chart of accounts.
+
+**Not done yet** (each was measured in the profile, none needed at this scale):
+- check an entry's balance once instead of on every posting (the deferred trigger runs 5 times per capture, 25% of SQL time);
+- build the capture response without re-reading the payment;
+- batch the SQL itself (multi-row inserts per batch).
 
 ## Round 2: stored balances vs group commit
 
@@ -56,18 +99,12 @@ Run `20261016-214831`, no other containers on the host.
 | pg-batched-10 | 262 | 2 / 3 ms | 2 / 2 ms |
 | pg-batched-100 | 314 | 2 / 3 ms | 2 / 2 ms |
 
-**What it shows:**
-- **Row locks are never the bottleneck.** Lock waits were 0% in every step of every variant, including every payment on one merchant at saturation. That is why splitting hot accounts (round 1) could not help.
-- **Postgres is mostly idle.** Even at saturation, `STORED` had 0.3–0.9 active Postgres backends on average. The time it does spend is largely IO: the WAL flush at commit, 30–50% of active samples near the limit. The rest of the time goes into the app: HTTP, JSON, JDBC round trips on 1 CPU.
+**What it showed** (read with round 3 in mind: here only 3 requests could be in flight):
+- **No lock waits at all.** Lock waits were 0% in every step, but only because 3 request threads could not create contention, not because locks are free. Round 3 shows them.
+- **Postgres looked idle:** 0.3–0.9 active backends at saturation. This was the clue that led to profiling: the app was not CPU-bound either, it was waiting on 3 threads.
 - **Group commit with large batches lifts the ceiling by about a third:** 300 → 400 rps in every scenario, and 271 → 314 payments/s in bulk ingest. It saves exactly that commit and balance-update work: 100 requests share one commit and four balance `UPDATE`s instead of 100 and 400.
 - **Small batches lose.** A single writer runs every request's statements one after another on one connection; `STORED` spreads them over the pool. With batches of 10, the commits saved do not pay for that lost parallelism; with 100, they do.
 - **Under light load nothing changes.** A batch takes only what is already queued (`BATCH_MAX_WAIT_MS=0`), so at low rates batches hold one request and latency is the same as `STORED`.
-
-**What would lift it further:**
-- **Batch the SQL itself, not only the commit:** one multi-row `INSERT` per table per batch instead of ~8 statements per request. This is what TigerBeetle does natively.
-- **Give the app more of the budget:** the database is underused.
-
-Neither is needed at this service's scale.
 
 ## Round 1: six variants (history)
 
@@ -114,8 +151,8 @@ Snapshot-only reads were up to 1004 ms stale, with up to 361 entries waiting for
 - **Snapshot-only reads are cheap but stale, and writes get no cheaper:** each request still commits on its own.
 - **The sharding test was uninformative.**
   - Only clearing, fee and tax were split; the hot merchant's own `merchant_payable` row was not, so the `hot` scenario still had one shared row per payment.
-  - More importantly, round 2's lock sampling shows there was no lock contention to remove.
-  - Sharding belongs to a system that has measured lock waits.
+  - More importantly, rounds 1 and 2 could not create lock contention (3 request threads); round 3 shows that `STORED` does contend once they are fixed.
+  - Sharding is worth revisiting against round 3's lock waits.
 
 **TigerBeetle** was measured twice, with the same TigerBeetle split of the budget (app 0.8 CPU / 384 MB, Postgres 0.4 CPU / 256 MB, TigerBeetle 0.8 CPU / 2432 MB):
 
@@ -128,11 +165,12 @@ Both runs failed at 400 rps. The second run's capture result is a stall, not a t
 
 ## What we kept
 
-- **`STORED`** (default): one transaction per request; simple and exact. Its ceiling here is the app's CPU and the per-request commit, not locks.
-- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BATCH_MAX_SIZE`, `BATCH_MAX_WAIT_MS`): group commit, still exact and synchronous; +33% throughput at batch size 100 on this budget.
+- **`STORED`** (default): one transaction per request; simple and exact. On this budget it holds 300–500 rps; the limit is the hot accounts' row locks.
+- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BATCH_MAX_SIZE`, `BATCH_MAX_WAIT_MS`): group commit, still exact and synchronous; 600–800 rps at batch size 100, with no lock waits.
 
 To reproduce:
 
 ```bash
 perf/run-benchmarks.sh                       # pg-stored, pg-batched-10, pg-batched-100 (~75 min); perf/results/<time>/summary.md
+perf/run-benchmarks.sh pg-stored pg-batched-100   # round 3 (~50 min)
 ```

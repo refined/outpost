@@ -202,6 +202,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |
 | 26 | Demo data | `perf/k6/seed.js`: deterministic (SEED), idempotent (PREFIX); ~100 Zipf-sized merchants, 3 currencies, 9 jurisdictions, ~7% refunds, 4 refund-heavy anomalies |
 | 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; pg_stat_activity is sampled every 200 ms per step (share of active backends waiting on Lock / IO) |
+| 28 | Blocking JDBC in Ktor | Route handlers run database work in `blocking { }` = `withContext(Dispatchers.IO)` (`api/Routes.kt`). With a 1-CPU container Ktor has only 3 request threads; blocking JDBC on them capped concurrency at 3 (found with JFR, 2026-10-17). Next steps if needed: virtual threads, then an async driver |
 
 ## Ideas not done (candidates if time allows)
 

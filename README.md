@@ -173,8 +173,8 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
 - **Own ledger on Postgres instead of TigerBeetle or Formance.** The payment and its journal entry commit in one transaction. An external ledger would turn every payment into a write to two systems that can disagree. We integrated TigerBeetle and measured it: under the same 2 CPU / 3 GB budget it was the slowest variant, so it was removed. The ledger is a small module that knows nothing about payments, so it can still be replaced.
 - **Balances stored and updated synchronously, not recomputed on every read or fed from a queue.**
   - Reads are instant and always exact.
-  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. Measured, it is not the bottleneck: lock waits were 0% at every load, even with every payment on one merchant; on 2 CPUs the service tops out at ~300–400 captures/s on CPU and commits.
-  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account, balances stay exact, and the ceiling rose by about a third.
+  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~300–500 captures/s, the lowest with every payment on one merchant.
+  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact, and it held 600–800 rps.
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
 
 More, including concurrency alternatives, time handling, and what each out-of-scope feature would add: [docs/design.md](docs/design.md#trade-offs).
