@@ -76,3 +76,7 @@ class NotFoundException(code: String, message: String) : DomainException(code, m
 class ConflictException(code: String, message: String) : DomainException(code, message)
 
 class UnprocessableException(code: String, message: String) : DomainException(code, message)
+
+data class PaymentPage(val total: Long, val rows: List<PaymentDetails>)
+
+internal data class Stored<T>(val value: T, val fingerprint: String)

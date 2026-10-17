@@ -176,6 +176,7 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
   - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~600–800 captures/s, the lowest when every payment goes to one merchant (a benchmark scenario).
   - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact, and it held ~1000 rps.
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
+- **Explicit SQL with a small JDBC helper.** `*Table` objects hold queries; `${param(value)}` interpolation binds values safely. Services coordinate transactions and business rules without an ORM.
 
 More, including concurrency alternatives, time handling, and what each out-of-scope feature would add: [docs/design.md](docs/design.md#trade-offs).
 

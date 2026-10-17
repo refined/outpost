@@ -11,7 +11,7 @@ import javax.sql.DataSource
 
 class LedgerBatchCommit(
     private val dataSource: DataSource,
-    private val ledger: Ledger,
+    private val ledger: LedgerWriter,
     private val maxSize: Int,
     private val maxWaitMs: Long,
 ) : AutoCloseable {
@@ -84,7 +84,7 @@ class LedgerBatchCommit(
                         }
                         .onFailure { conn.rollback(savepoint) }
                 }
-                ledger.applyDeltas(conn, deltas)
+                LedgerTable.applyDeltas(conn, deltas)
                 outcomes
             }
         } catch (e: Exception) {

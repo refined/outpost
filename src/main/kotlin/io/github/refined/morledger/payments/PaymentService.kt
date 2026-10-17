@@ -4,7 +4,7 @@ import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
 import io.github.refined.morledger.ledger.LedgerBatchCommit
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.LedgerWriter
 import io.github.refined.morledger.ledger.NewJournalEntry
 import io.github.refined.morledger.money.Allocation
 import kotlinx.coroutines.Dispatchers
@@ -20,7 +20,7 @@ class PaymentService(
     private val dataSource: DataSource,
     private val pricing: PricingSettings = PricingSettings(),
     private val clock: Clock = Clock.systemUTC(),
-    private val ledger: Ledger = Ledger(),
+    private val ledger: LedgerWriter = LedgerWriter(),
     private val batchCommit: LedgerBatchCommit? = null,
 ) {
     suspend fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
@@ -55,7 +55,7 @@ class PaymentService(
         )
 
         return write { conn, deltas ->
-            val created = PaymentRepository.insertPayment(conn, payment, fingerprint)
+            val created = PaymentsTable.insert(conn, payment, fingerprint)
             if (created) {
                 ledger.post(
                     conn,
@@ -69,7 +69,7 @@ class PaymentService(
                     deltas,
                 )
             } else {
-                val existing = PaymentRepository.findPayment(conn, cmd.paymentId)!!
+                val existing = PaymentsTable.find(conn, cmd.paymentId)!!
                 if (existing.fingerprint != fingerprint) {
                     throw ConflictException(
                         "idempotency_conflict",
@@ -77,7 +77,7 @@ class PaymentService(
                     )
                 }
             }
-            Recorded(PaymentRepository.details(conn, cmd.paymentId)!!, created)
+            Recorded(details(conn, cmd.paymentId)!!, created)
         }
     }
 
@@ -90,17 +90,17 @@ class PaymentService(
 
         return write { conn, deltas ->
             // Lock first: concurrent refunds of the same payment queue up here and see each other's results.
-            val payment = PaymentRepository.findPayment(conn, cmd.paymentId, forUpdate = true)?.value
+            val payment = PaymentsTable.find(conn, cmd.paymentId, forUpdate = true)?.value
                 ?: throw NotFoundException("payment_not_found", "payment ${cmd.paymentId} has not been captured")
 
-            PaymentRepository.findRefund(conn, cmd.refundId)?.let { existing ->
+            RefundsTable.find(conn, cmd.refundId)?.let { existing ->
                 return@write replayRefund(conn, existing, fingerprint)
             }
 
             if (refundedAt.isBefore(payment.capturedAt)) {
                 throw UnprocessableException("refund_before_capture", "refundedAt is before the payment's capturedAt")
             }
-            val before = PaymentDetails(payment, PaymentRepository.refundsOf(conn, payment.paymentId))
+            val before = PaymentDetails(payment, RefundsTable.forPayment(conn, payment.paymentId))
             val remaining = before.refundable
             if (remaining.total == 0L) {
                 throw UnprocessableException("payment_fully_refunded", "payment ${payment.paymentId} is already fully refunded")
@@ -114,7 +114,7 @@ class PaymentService(
             }
 
             val refund = Refund(cmd.refundId, payment.paymentId, Allocation.allocateRefund(remaining, amount), refundedAt, refundedAt)
-            if (!PaymentRepository.insertRefund(conn, refund, fingerprint)) {
+            if (!RefundsTable.insert(conn, refund, fingerprint)) {
                 // The same refundId was just recorded for another payment (that payment's lock didn't stop us).
                 throw ConflictException("idempotency_conflict", "refund ${cmd.refundId} already exists")
             }
@@ -129,27 +129,33 @@ class PaymentService(
                 ),
                 deltas,
             )
-            val after = PaymentRepository.details(conn, payment.paymentId)!!
+            val after = details(conn, payment.paymentId)!!
             Recorded(RefundResult(after.refunds.single { it.refundId == refund.refundId }, after), created = true)
         }
     }
 
-    fun page(merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): Pair<Long, List<PaymentDetails>> =
-        dataSource.transaction { PaymentRepository.page(it, merchantId, status, limit, offset) }
+    fun page(merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): PaymentPage =
+        dataSource.transaction { conn ->
+            val page = PaymentsTable.page(conn, merchantId, status, limit, offset)
+            PaymentPage(page.total, page.rows.map { PaymentDetails(it, RefundsTable.forPayment(conn, it.paymentId)) })
+        }
 
     fun get(paymentId: String): PaymentDetails =
-        dataSource.transaction { PaymentRepository.details(it, paymentId) }
+        dataSource.transaction { details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")
 
     // STORED blocks on JDBC, so it runs on the IO pool; BATCHED only waits for the writer thread, suspended.
     private suspend fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
         if (batchCommit != null) batchCommit.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
 
+    private fun details(conn: Connection, paymentId: String): PaymentDetails? =
+        PaymentsTable.find(conn, paymentId)?.let { PaymentDetails(it.value, RefundsTable.forPayment(conn, paymentId)) }
+
     private fun replayRefund(conn: Connection, existing: Stored<Refund>, fingerprint: String): Recorded<RefundResult> {
         if (existing.fingerprint != fingerprint) {
             throw ConflictException("idempotency_conflict", "refund ${existing.value.refundId} was already recorded with a different payload")
         }
-        return Recorded(RefundResult(existing.value, PaymentRepository.details(conn, existing.value.paymentId)!!), created = false)
+        return Recorded(RefundResult(existing.value, details(conn, existing.value.paymentId)!!), created = false)
     }
 
     private fun validateEventTime(field: String, value: Instant?): Instant {

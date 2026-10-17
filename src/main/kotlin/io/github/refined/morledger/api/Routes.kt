@@ -2,7 +2,7 @@ package io.github.refined.morledger.api
 
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.LedgerTable
 import io.github.refined.morledger.payments.CaptureCommand
 import io.github.refined.morledger.payments.PaymentService
 import io.github.refined.morledger.payments.validateCurrency
@@ -51,7 +51,6 @@ fun Application.routes(
     dataSource: DataSource,
     payments: PaymentService,
     reports: BalanceReport,
-    ledger: Ledger,
     ledgerDescription: String,
     analytics: Analytics,
 ) {
@@ -93,8 +92,8 @@ fun Application.routes(
                 }
                 val limit = parseLimit(q["limit"], default = 50)
                 val offset = intParam("offset", q["offset"], default = 0, range = 0..Int.MAX_VALUE)
-                val (total, page) = blocking { payments.page(q["merchantId"], status, limit, offset) }
-                call.respond(PaymentsResponse(page.map { it.toDto() }, total))
+                val page = blocking { payments.page(q["merchantId"], status, limit, offset) }
+                call.respond(PaymentsResponse(page.rows.map { it.toDto() }, page.total))
             }
 
             get("/payments/{paymentId}") {
@@ -125,18 +124,18 @@ fun Application.routes(
                 val accountCode = q["merchantId"]?.let { ChartOfAccounts.MERCHANT_PAYABLE_PREFIX + it }
                 val before = q["before"]?.let { it.toLongOrNull() ?: throw ValidationException("before must be an entry id") }
                 val limit = parseLimit(q["limit"], default = 100)
-                val entries = blocking { dataSource.transaction { ledger.entries(it, q["paymentId"], accountCode, limit, before) } }
+                val entries = blocking { dataSource.transaction { LedgerTable.entries(it, q["paymentId"], accountCode, limit, before) } }
                 call.respond(JournalResponse(entries.map { it.toDto() }))
             }
 
             get("/ledger/accounts") {
                 val currency = call.request.queryParameters["currency"]?.let { validateCurrency(it) }
-                val accounts = blocking { dataSource.transaction { ledger.balances(it, null, currency) } }
+                val accounts = blocking { dataSource.transaction { LedgerTable.balances(it, null, currency) } }
                 call.respond(AccountsResponse(accounts.map { AccountDto(it.account.code, it.account.currency, it.account.normalSide.name, it.balance) }))
             }
 
             get("/ledger/verify") {
-                val mismatches = blocking { dataSource.transaction { ledger.verify(it) } }
+                val mismatches = blocking { dataSource.transaction { LedgerTable.verify(it) } }
                 call.respond(VerifyResponse(mismatches.isEmpty(), mismatches.map { MismatchDto(it.account.code, it.account.currency, it.stored, it.fromPostings) }))
             }
 

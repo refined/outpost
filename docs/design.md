@@ -27,11 +27,11 @@ With `REFUND_FEE_POLICY=MOR_RETURNS_FEE`, the refunds also debit `fee_revenue` a
 **Balances.** Each account stores its running `balance`. It moves in the **same transaction** as the postings, via an atomic `UPDATE ledger.accounts SET balance = balance + x`:
 - the current report reads it directly (O(1) per account);
 - an `asOf` report sums the postings up to that time (the history);
-- `Ledger.verify` reconciles stored balances against the postings, and the tests run it after the money flows.
+- `LedgerTable.verify` reconciles stored balances against the postings, and the tests run it after the money flows.
 
 This is the model the established ledgers use: TigerBeetle keeps debit/credit counters on each account; Modern Treasury keeps balances on the account with a lock version.
 
-**Balanced, single-currency entries** are enforced in code: `Ledger.validated` checks every entry before it is written, and it is the only write path. `/v1/ledger/verify` detects anything written around it. A deferred constraint trigger did the same check in the database; profiling showed it ran once per inserted row (5 times per capture) at commit, so it was removed (see [performance.md](performance.md), round 4).
+**Balanced, single-currency entries** are enforced in code: the pure `validatedPostings` function checks every entry through `LedgerWriter`, the shared write path for both balance modes. `/v1/ledger/verify` detects anything written around it. A deferred constraint trigger did the same check in the database; profiling showed it ran once per inserted row (5 times per capture) at commit, so it was removed (see [performance.md](performance.md), round 4).
 
 **Invariants enforced by the database**, not only by the code (see [V1__schema.sql](../src/main/resources/db/migration/V1__schema.sql)):
 - **Append-only history.** Triggers reject `UPDATE`/`DELETE` on postings, entries, payments and refunds; corrections are new entries.
@@ -40,7 +40,30 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
 
-**Code layout.** The ledger ([`ledger/Ledger.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/Ledger.kt)) knows nothing about payments. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+**Code layout.** `LedgerWriter` validates postings, caches existing account ids and coordinates ordered writes; `LedgerTable` contains SQL and row mapping. `LedgerBatchCommit` manages the queue, savepoints, commit and retry. These components know nothing about payment rules. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+
+## SQL access
+
+Stateless `internal object *Table` components contain SQL and row mapping. `PaymentsTable` and `RefundsTable` return stored records; `PaymentService` assembles `PaymentDetails` and the named `PaymentPage`. A Table can query several related physical tables: `LedgerTable` handles the ledger schema, and `AnalyticsTable` handles business-table aggregates. `Analytics` assembles reports, fills time-series gaps and reconciles merchant balances with the ledger.
+
+`AnalyticsTable.paymentFlows` and `refundFlows` use separate queries so their source tables, amount columns and event-time filters are visible in SQL. Refund apportionment lives directly in `Allocation.allocateRefund`, including the largest-remainder calculation and merchant → fee → tax tie-break.
+
+The small JDBC helper in `db/Sql.kt` keeps statements explicit without a new dependency:
+
+```kotlin
+val query = sql {
+    """
+    SELECT payment_id
+    FROM payments
+    WHERE ${where {
+        if (merchantId != null) add("merchant_id = ${param(merchantId)}")
+    }}
+    """
+}
+val ids = conn.query(query) { it.getString("payment_id") }
+```
+
+`param` returns `?` and records the value in order; it never escapes or inserts the value into SQL. Write queries as multiline SQL with each clause on its own line, including subqueries. Optional conditions live inline at `WHERE ${where { ... }}`: the small `where` helper joins them with `AND`, or returns `TRUE` for an empty list. Conditions register parameters in their SQL order. Ordinary interpolation is reserved for static SQL fragments and enum-controlled identifiers or sort directions. Do not concatenate completed `Sql` objects: their parameter lists must stay attached to their text. JDBC helpers close statements and result sets, bind nullable values and convert `Instant` to UTC. Batch inserts and balance updates reuse one prepared statement with `executeBatch`; balance updates keep account-id order. Transactions remain explicit at the service or batch boundary.
 
 ## Balance modes
 
@@ -112,7 +135,7 @@ Where the brief is open, these are the decisions and why.
 - **Formance Ledger**
   - What it offers: a ready ledger API, Numscript for splits (including rounding allotments), and built-in audit history.
   - What it costs: a separate service to run, the same dual-write problem, and the domain rules would live in Numscript instead of tested Kotlin.
-- **Our engine** is small and sits behind one module (`Ledger`) that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (append-only triggers, fixed account identity).
+- **Our engine** is small and sits behind the ledger package that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (append-only triggers, fixed account identity).
 
 **Running balances, updated synchronously.**
 - **Chosen:** the stored balance changes in the same transaction as its postings.
@@ -185,10 +208,11 @@ Two Gradle test suites ([JVM Test Suite plugin](https://docs.gradle.org/current/
 
 | Suite | Folder | What | Rule |
 |---|---|---|---|
-| `test` | `src/test/kotlin` | Unit tests of pure functions: money math (with a seeded property test over 10,000 random refund sequences), journal-entry validation, report grouping, config parsing | No database, no app, no setup beyond constructing values |
+| `test` | `src/test/kotlin` | Unit tests of pure functions: money math (with a seeded property test over 10,000 random refund sequences), journal-entry validation, report grouping, config parsing, SQL parameter construction | No database, no app, no setup beyond constructing values |
 | `integrationTest` | `src/integrationTest/kotlin` | The service through its HTTP API (Ktor `testApplication`) against a real Postgres | Everything with state is tested here, through the API |
 
 The integration suite covers:
+- **SQL parameters**: HTTP reads with quotes and SQL syntax in identifiers/search remain literal filters; normal filter combinations and pagination retain their totals and ordering. Unit tests cover parameter order, repetition, nulls and optional conditions.
 - **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, analytics, validation.
 - **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
 - **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; in a batch, a conflicting capture and an over-refund fail alone while their neighbours commit; concurrent batched captures lose nothing.
@@ -235,10 +259,16 @@ build.gradle.kts               Gradle build (no wrapper; versions inline)
 docs/                          requirements, design notes, demo.http, domain background
 src/main/kotlin/io/github/refined/morledger/
   money/Allocation.kt          capture split, refund apportionment (pure functions)
-  ledger/Ledger.kt             double-entry engine: post (+ running balances), balances, verify, entries
+  ledger/Model.kt              ledger models and pure posting validation
+  ledger/LedgerWriter.kt       account cache and posting coordination
+  ledger/LedgerTable.kt        ledger SQL and row mapping
+  ledger/LedgerBatchCommit.kt  queue, savepoints, group commit, retry
   ledger/ChartOfAccounts.kt    accounts and the postings for capture/refund
-  payments/                    PaymentService (transactions, idempotency, locking), repository, model
+  payments/                    PaymentService (transactions, idempotency, locking), PaymentsTable, RefundsTable, model
   reports/BalanceReport.kt     ledger balances -> report
+  reports/Analytics.kt         report assembly, gap filling, reconciliation
+  reports/AnalyticsTable.kt    SQL aggregates
+  db/Sql.kt                    safe parameter interpolation and JDBC helpers
   api/                         routes, DTOs, error mapping
 src/main/resources/
   db/migration/                Flyway: V1__schema.sql (ledger + business tables, constraints, triggers)

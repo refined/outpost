@@ -120,6 +120,13 @@ class AnalyticsApiTest {
         val partial = client.getJson("/v1/payments?status=PARTIALLY_REFUNDED")
         assertEquals(listOf("p1"), partial.objects("payments").map { it.str("paymentId") })
 
+        val combined = client.getJson("/v1/payments?merchantId=acme&status=PARTIALLY_REFUNDED&limit=1")
+        assertEquals(1, combined.long("total"))
+        assertEquals(listOf("p1"), combined.objects("payments").map { it.str("paymentId") })
+        val pastEnd = client.getJson("/v1/payments?merchantId=acme&status=PARTIALLY_REFUNDED&limit=1&offset=1")
+        assertEquals(1, pastEnd.long("total"))
+        assertTrue(pastEnd.objects("payments").isEmpty())
+
         assertEquals(HttpStatusCode.BadRequest, client.get("/v1/payments?status=LOST").status)
     }
 

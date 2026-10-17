@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 /** Below the API: which requests share a batch cannot be controlled over HTTP. */
 class LedgerBatchCommitTest {
     private val dataSource = TestDatabase.dataSource
-    private val ledger = Ledger()
+    private val ledger = LedgerWriter()
     private val clearing = Account("psp_clearing", "EUR", NormalSide.DEBIT)
     private val merchant = Account("merchant_payable:m_1", "EUR", NormalSide.CREDIT)
 
@@ -45,9 +45,9 @@ class LedgerBatchCommitTest {
             assertTrue(batchCommit.batches < 20, "${batchCommit.items} items in ${batchCommit.batches} batches")
         }
 
-        val balances = dataSource.transaction { ledger.balances(it) }.associate { it.account.code to it.signedSum }
+        val balances = dataSource.transaction { LedgerTable.balances(it) }.associate { it.account.code to it.signedSum }
         assertEquals(19 * 100L, balances["psp_clearing"])
-        assertEquals(19L, dataSource.transaction { ledger.entries(it, limit = 1000) }.size.toLong())
-        assertEquals(emptyList(), dataSource.transaction { ledger.verify(it) })
+        assertEquals(19L, dataSource.transaction { LedgerTable.entries(it, limit = 1000) }.size.toLong())
+        assertEquals(emptyList(), dataSource.transaction { LedgerTable.verify(it) })
     }
 }

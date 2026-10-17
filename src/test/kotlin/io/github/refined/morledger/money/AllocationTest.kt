@@ -3,7 +3,6 @@ package io.github.refined.morledger.money
 import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import kotlin.random.Random
-import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
@@ -64,10 +63,10 @@ class AllocationTest {
     }
 
     @Test
-    fun `apportion uses largest remainders and breaks ties towards earlier buckets`() {
-        assertContentEquals(longArrayOf(1, 0, 0), Allocation.apportion(1, longArrayOf(1, 1, 1)))
-        assertContentEquals(longArrayOf(1, 1, 0), Allocation.apportion(2, longArrayOf(1, 1, 1)))
-        assertContentEquals(longArrayOf(4, 1), Allocation.apportion(5, longArrayOf(7, 3)))
+    fun `refund uses largest remainders and breaks ties merchant then fee then tax`() {
+        assertEquals(Split(tax = 0, fee = 0, merchant = 1), Allocation.allocateRefund(Split(1, 1, 1), 1))
+        assertEquals(Split(tax = 0, fee = 1, merchant = 1), Allocation.allocateRefund(Split(1, 1, 1), 2))
+        assertEquals(Split(tax = 1, fee = 0, merchant = 4), Allocation.allocateRefund(Split(3, 0, 7), 5))
     }
 
     /**

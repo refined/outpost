@@ -47,20 +47,12 @@ object Allocation {
         if (amount == remaining.total) return remaining
 
         // Tie-break order merchant → fee → tax: a cent on a tie never reduces the tax owed (conservative for the authority).
-        val (merchant, fee, tax) = apportion(amount, longArrayOf(remaining.merchant, remaining.fee, remaining.tax))
-        return Split(tax = tax, fee = fee, merchant = merchant)
-    }
-
-    /** Largest remainder (Hamilton): shares stay within their buckets and sum to [amount]; ties go to the earlier bucket. */
-    internal fun apportion(amount: Long, buckets: LongArray): LongArray {
-        val total = buckets.sum()
-        require(buckets.all { it >= 0 } && amount in 0..total)
-        if (total == 0L) return LongArray(buckets.size)
-
+        val buckets = longArrayOf(remaining.merchant, remaining.fee, remaining.tax)
+        require(buckets.all { it >= 0 })
         val a = BigInteger.valueOf(amount)
-        val t = BigInteger.valueOf(total)
+        val t = BigInteger.valueOf(remaining.total)
         val shares = LongArray(buckets.size)
-        val remainders = arrayOfNulls<BigInteger>(buckets.size)
+        val remainders = Array(buckets.size) { BigInteger.ZERO }
         for (i in buckets.indices) {
             val (q, r) = BigInteger.valueOf(buckets[i]).multiply(a).divideAndRemainder(t)
             shares[i] = q.longValueExact()
@@ -68,9 +60,10 @@ object Allocation {
         }
         val leftover = (amount - shares.sum()).toInt()
         buckets.indices
-            .sortedWith(compareByDescending<Int> { remainders[it]!! }.thenBy { it })
+            .sortedWith(compareByDescending<Int> { remainders[it] }.thenBy { it })
             .take(leftover)
             .forEach { shares[it]++ }
-        return shares
+        val (merchant, fee, tax) = shares
+        return Split(tax = tax, fee = fee, merchant = merchant)
     }
 }

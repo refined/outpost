@@ -3,7 +3,7 @@ package io.github.refined.morledger.reports
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.AccountBalance
 import io.github.refined.morledger.ledger.ChartOfAccounts
-import io.github.refined.morledger.ledger.Ledger
+import io.github.refined.morledger.ledger.LedgerTable
 import java.time.Instant
 import javax.sql.DataSource
 
@@ -23,9 +23,9 @@ data class Balances(
     val integrity: Integrity,
 )
 
-class BalanceReport(private val dataSource: DataSource, private val ledger: Ledger = Ledger()) {
+class BalanceReport(private val dataSource: DataSource) {
     fun build(asOf: Instant? = null, currency: String? = null): Balances =
-        fromLedger(dataSource.transaction { ledger.balances(it, asOf, currency) }, asOf)
+        fromLedger(dataSource.transaction { LedgerTable.balances(it, asOf, currency) }, asOf)
 
     companion object {
         fun fromLedger(balances: List<AccountBalance>, asOf: Instant?): Balances {

@@ -17,7 +17,7 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a deterministic ~100k-payment demo dataset;
   - two balance modes, `STORED` and `BATCHED` (group commit), chosen after benchmarking (docs/performance.md); computed, snapshot, sharded and TigerBeetle variants were measured and removed (commit `0ffcf3f` has them).
 
-  54 tests: 20 unit, 34 integration. CI runs the Docker path.
+  59 tests: 24 unit, 35 integration. CI runs the Docker path.
 - **Platforms:** must run on macOS, Linux and Windows. This is guaranteed by running everything in Linux containers (Docker / Docker Desktop).
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -61,14 +61,18 @@ docs/ledger-comparison.md        platforms compared + the decision; docs/perform
 src/main/kotlin/io/github/refined/morledger/
   Application.kt                 main(), AppConfig (env), Application.module()
   money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
-  ledger/Ledger.kt               model + Ledger: post (balance deltas now or collected), applyDeltas, balances, verify, entries
+  ledger/Model.kt                ledger models + pure validatedPostings
+  ledger/LedgerTable.kt          SQL + mapping: accounts, journal, postings, balances, verify
+  ledger/LedgerWriter.kt         posting validation, account-id cache, ordered writes, immediate or collected balance deltas
   ledger/LedgerBatchCommit.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, savepoint per request, one balance UPDATE per account
   ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
-  payments/                      PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
+  payments/                      PaymentService (tx, idempotency, locking), PaymentsTable + RefundsTable (SQL), Model (+ DomainException types)
   reports/BalanceReport.kt       ledger balances -> report
-  reports/Analytics.kt           summary / timeseries / per-merchant breakdown from payments+refunds, reconciled with the ledger
+  reports/Analytics.kt           report assembly, time-series gap filling, reconciliation
+  reports/AnalyticsTable.kt      SQL aggregates from payments + refunds
   api/                           Routes, AnalyticsRoutes, Dto (wire format), Errors (DomainException -> HTTP status)
   db/Database.kt                 Hikari + Flyway, DataSource.transaction { }
+  db/Sql.kt                      safe sql { "... ${param(value)}" }, JDBC query/update/batch, UTC binding
 src/main/resources/
   db/migration/                  V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
   web/                           ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
@@ -138,16 +142,19 @@ Rules:
 ## Coding conventions
 
 - All files, code, comments and commit messages are in English.
+- **SQL:** use multiline queries with `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT` (with `OFFSET`), `SET`, `VALUES` and `RETURNING` on separate lines, including subqueries. Put optional conditions inline at `WHERE ${where { ... }}`; `where` joins them with `AND` and returns `TRUE` when empty. Bind values through `param` in SQL order.
 - **Comments:** none by default. Only a lock order, a race, an external quirk or an invariant enforced elsewhere earns one line. No KDoc on obvious types, no comments repeating a config key, an option or a design-doc decision.
 - **Money:**
   - amounts are `Long` minor units plus an ISO-4217 currency code, never `Double`/`Float`;
   - rates and percentages are `BigDecimal` (or basis points as `Long`);
   - rounding happens in one place, with a documented rule.
+  - refund apportionment lives directly in `Allocation.allocateRefund`; tie-break tests exercise this function.
 - **Ledger:**
   - append-only: never `UPDATE`/`DELETE` journal entries or postings; corrections are new entries;
   - every journal entry balances (Σ debits = Σ credits per currency), enforced in code and, where practical, in the DB;
   - balances are derived from postings.
 - **Transactions:** one business operation is one DB transaction (`DataSource.transaction { }`). The business record (payment, refund) and its journal entry are written together.
+- **Analytics SQL:** keep payment and refund aggregates as separate `paymentFlows` and `refundFlows` queries; their source tables, columns and event-time filters stay explicit.
 - **Idempotency:** every mutating API must be safe to retry (an idempotency key or natural key such as the external payment id).
 - **Migrations:** never edit an applied migration; add a new `V{n}__*.sql`.
 - **Tests:** money flows are covered through the API against real Postgres; pure functions get unit tests.
@@ -189,10 +196,10 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 12 | Concurrency | Refund = `SELECT … FOR UPDATE` on the payment; capture = `INSERT … ON CONFLICT DO NOTHING` + fingerprint compare |
 | 13 | Time | `effective_at` (event time, `asOf` filters on it) and `recorded_at`; future event times → 400 (5 min skew) |
 | 14 | JSON | Strict: unknown fields → 400; amounts are integers; rates are decimal strings |
-| 15 | Ledger engine | Own, on Postgres; DB enforces append-only history (triggers) and that accounts only change their `balance`; TRUNCATE allowed for tests. Entry balance is enforced in code (`Ledger.validated`, single write path) and detected by `verify`; the deferred balance trigger was dropped on 2026-10-17 (it ran 5× per capture at commit) |
+| 15 | Ledger engine | Own, on Postgres; DB enforces append-only history (triggers) and that accounts only change their `balance`; TRUNCATE allowed for tests. Entry balance is enforced in code (`validatedPostings` via `LedgerWriter`, single write path) and detected by `verify`; the deferred balance trigger was dropped on 2026-10-17 (it ran 5× per capture at commit) |
 | 16 | Demo | `/ui` vanilla JS console + `/docs` Swagger (swagger-ui-dist from jsDelivr, pinned 5.33.0); no extra Gradle dependency |
 | 17 | Runtime | Everything in Docker: app image + Postgres via compose; tests via the compose `test` profile; CI has a `docker` job (build, smoke test, tests in Docker) |
-| 18 | Balances | Stored running `balance` per account, updated in the same tx via atomic `UPDATE … balance = balance + x`, accounts locked in id order as the last statements; the current report reads it; `asOf` sums postings; `Ledger.verify` reconciles (used in tests). Rejected: SUM on read, snapshots, queue-fed balances, optimistic locking, app-level locks (see README Trade-offs) |
+| 18 | Balances | Stored running `balance` per account, updated in the same tx via atomic `UPDATE … balance = balance + x`, accounts locked in id order as the last statements; the current report reads it; `asOf` sums postings; `LedgerTable.verify` reconciles (used in tests). Rejected: SUM on read, snapshots, queue-fed balances, optimistic locking, app-level locks (see README Trade-offs) |
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 | 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
 | 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → short assumptions and trade-offs. Details go to `docs/design.md` |
@@ -205,6 +212,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 28 | Blocking JDBC in Ktor | Route handlers run database work in `blocking { }` = `withContext(Dispatchers.IO)` (`api/Routes.kt`). With a 1-CPU container Ktor has only 3 request threads; blocking JDBC on them capped concurrency at 3 (found with JFR, 2026-10-17). Next steps if needed: virtual threads, then an async driver |
 | 29 | Batch commit wait | `LedgerBatchCommit.submit` is `suspend` and awaits its batch (`CompletableFuture.await`); a waiting request holds no thread. `PaymentService.capture/refund` are `suspend`; `STORED` runs on `Dispatchers.IO` inside the service |
 | 30 | JDBC batching | Hikari property `reWriteBatchedInserts=true`: a capture's postings go as one multi-row INSERT. Measured neutral on throughput, kept for fewer round trips. Grouping a whole batch's SQL by hand was estimated and skipped |
+| 31 | SQL layer (2026-10-17) | Stateless `internal object *Table` components own SQL and row mapping; a Table may span related physical tables. `LedgerWriter` owns validation, account caching and posting coordination; `LedgerBatchCommit` owns queue/savepoints/commit/retry. `AnalyticsTable` owns queries; `Analytics` assembles reports. Safe `sql { "... ${param(value)}" }` keeps values as JDBC parameters; dynamic filters register values in the same builder. No ORM or new dependency. |
 
 ## Ideas not done (candidates if time allows)
 

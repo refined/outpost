@@ -11,7 +11,7 @@ class JournalEntryValidationTest {
 
     @Test
     fun `zero lines are dropped`() {
-        val lines = Ledger.validated(entry(ChartOfAccounts.capture("EUR", "NL", "m_1", Split(tax = 0, fee = 0, merchant = 500))))
+        val lines = validatedPostings(entry(ChartOfAccounts.capture("EUR", "NL", "m_1", Split(tax = 0, fee = 0, merchant = 500))))
 
         assertEquals(listOf(500L, -500L), lines.map { it.amount })
     }
@@ -20,21 +20,21 @@ class JournalEntryValidationTest {
     fun `an unbalanced entry is rejected`() {
         val postings = ChartOfAccounts.capture("EUR", "NL", "m_1", Split(0, 0, 100)) + Posting(ChartOfAccounts.feeRevenue("EUR"), -1)
 
-        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { validatedPostings(entry(postings)) }
     }
 
     @Test
     fun `an entry mixing currencies is rejected`() {
         val postings = listOf(Posting(ChartOfAccounts.pspClearing("EUR"), 100), Posting(ChartOfAccounts.feeRevenue("USD"), -100))
 
-        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { validatedPostings(entry(postings)) }
     }
 
     @Test
     fun `an entry needs at least two non-zero lines`() {
         val postings = listOf(Posting(ChartOfAccounts.pspClearing("EUR"), 0), Posting(ChartOfAccounts.feeRevenue("EUR"), 0))
 
-        assertFailsWith<IllegalArgumentException> { Ledger.validated(entry(postings)) }
+        assertFailsWith<IllegalArgumentException> { validatedPostings(entry(postings)) }
     }
 
     @Test

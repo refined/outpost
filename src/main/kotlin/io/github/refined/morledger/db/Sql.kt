@@ -1,0 +1,65 @@
+package io.github.refined.morledger.db
+
+import java.sql.Connection
+import java.sql.PreparedStatement
+import java.sql.ResultSet
+import java.sql.Types
+import java.time.Instant
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
+
+internal data class Sql(val text: String, val parameters: List<Any?>)
+
+internal class SqlBuilder {
+    private val parameters = mutableListOf<Any?>()
+
+    fun param(value: Any?): String {
+        parameters += value
+        return "?"
+    }
+
+    internal fun build(text: String) = Sql(text.trimIndent(), parameters.toList())
+}
+
+internal fun sql(block: SqlBuilder.() -> String): Sql = SqlBuilder().run { build(block()) }
+
+internal fun where(block: MutableList<String>.() -> Unit): String =
+    buildList(block).joinToString(" AND ").ifEmpty { "TRUE" }
+
+internal fun <T> Connection.query(sql: Sql, map: (ResultSet) -> T): List<T> =
+    prepareStatement(sql.text).use { statement ->
+        statement.bind(sql.parameters)
+        statement.executeQuery().use { rows -> buildList { while (rows.next()) add(map(rows)) } }
+    }
+
+internal fun Connection.update(sql: Sql): Int = prepareStatement(sql.text).use { statement ->
+    statement.bind(sql.parameters)
+    statement.executeUpdate()
+}
+
+internal fun <T> Connection.batch(items: List<T>, query: (T) -> Sql) {
+    if (items.isEmpty()) return
+    val first = query(items.first())
+    prepareStatement(first.text).use { statement ->
+        fun add(sql: Sql) {
+            require(sql.text == first.text) { "batch statements must have the same SQL" }
+            statement.bind(sql.parameters)
+            statement.addBatch()
+        }
+        add(first)
+        items.drop(1).forEach { add(query(it)) }
+        statement.executeBatch()
+    }
+}
+
+private fun PreparedStatement.bind(parameters: List<Any?>) {
+    parameters.forEachIndexed { index, value ->
+        when (value) {
+            null -> setNull(index + 1, Types.NULL)
+            is Instant -> setObject(index + 1, value.atOffset(ZoneOffset.UTC))
+            else -> setObject(index + 1, value)
+        }
+    }
+}
+
+internal fun ResultSet.instant(column: String): Instant = getObject(column, OffsetDateTime::class.java).toInstant()
