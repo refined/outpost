@@ -1,9 +1,9 @@
 package io.github.refined.morledger.ledger
 
 import io.github.refined.morledger.db.transaction
+import kotlinx.coroutines.future.await
 import java.sql.Connection
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ExecutionException
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -11,7 +11,7 @@ import javax.sql.DataSource
 
 /**
  * Group commit: one writer thread runs queued operations in batches, each batch in one transaction, and applies
- * the batch's balance changes with one UPDATE per account. Callers block until their batch has committed.
+ * the batch's balance changes with one UPDATE per account. Callers suspend, holding no thread, until their batch has committed.
  */
 class GroupCommitter(
     private val dataSource: DataSource,
@@ -39,14 +39,10 @@ class GroupCommitter(
     val batches: Long get() = batchCount.get()
     val items: Long get() = itemCount.get()
 
-    fun <T> submit(block: (Connection, MutableMap<Long, Long>) -> T): T {
+    suspend fun <T> submit(block: (Connection, MutableMap<Long, Long>) -> T): T {
         val work = Work(block)
         queue.put(work)
-        try {
-            return work.result.get()
-        } catch (e: ExecutionException) {
-            throw e.cause ?: e
-        }
+        return work.result.await()
     }
 
     override fun close() {

@@ -7,6 +7,8 @@ import io.github.refined.morledger.ledger.GroupCommitter
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.ledger.NewJournalEntry
 import io.github.refined.morledger.money.Allocation
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.sql.Connection
 import java.time.Clock
 import java.time.Duration
@@ -21,7 +23,7 @@ class PaymentService(
     private val ledger: Ledger = Ledger(),
     private val committer: GroupCommitter? = null,
 ) {
-    fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
+    suspend fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
         validateId("paymentId", cmd.paymentId)
         validateId("merchantId", cmd.merchantId)
         val currency = validateCurrency(cmd.currency)
@@ -79,7 +81,7 @@ class PaymentService(
         }
     }
 
-    fun refund(cmd: RefundCommand): Recorded<RefundResult> {
+    suspend fun refund(cmd: RefundCommand): Recorded<RefundResult> {
         validateId("paymentId", cmd.paymentId)
         validateId("refundId", cmd.refundId)
         if (cmd.amount != null && cmd.amount <= 0) throw ValidationException("amount must be a positive number of minor units")
@@ -139,8 +141,9 @@ class PaymentService(
         dataSource.transaction { PaymentRepository.details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")
 
-    private fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
-        if (committer != null) committer.submit(block) else dataSource.transaction { block(it, null) }
+    // STORED blocks on JDBC, so it runs on the IO pool; BATCHED only waits for the writer thread, suspended.
+    private suspend fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
+        if (committer != null) committer.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
 
     private fun replayRefund(conn: Connection, existing: Stored<Refund>, fingerprint: String): Recorded<RefundResult> {
         if (existing.fingerprint != fingerprint) {

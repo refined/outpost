@@ -2,6 +2,7 @@ package io.github.refined.morledger.ledger
 
 import io.github.refined.morledger.TestDatabase
 import io.github.refined.morledger.db.transaction
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.time.Instant
 import java.util.concurrent.Executors
@@ -27,10 +28,12 @@ class GroupCommitterTest {
             val pool = Executors.newFixedThreadPool(20)
             val results = (1..20).map { i ->
                 pool.submit<Long> {
-                    committer.submit { conn, deltas ->
-                        ledger.post(conn, entry("p_$i", 100), deltas)
-                        if (i == 7) error("item 7 fails after writing its entry")
-                        i.toLong()
+                    runBlocking {
+                        committer.submit { conn, deltas ->
+                            ledger.post(conn, entry("p_$i", 100), deltas)
+                            if (i == 7) error("item 7 fails after writing its entry")
+                            i.toLong()
+                        }
                     }
                 }
             }

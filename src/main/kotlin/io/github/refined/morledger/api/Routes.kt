@@ -81,7 +81,7 @@ fun Application.routes(
                     taxJurisdiction = req.taxJurisdiction,
                     capturedAt = instant("capturedAt", req.capturedAt),
                 )
-                val result = blocking { payments.capture(cmd) }
+                val result = payments.capture(cmd)
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toDto())
             }
 
@@ -110,7 +110,7 @@ fun Application.routes(
                     amount = req.amount,
                     refundedAt = instant("refundedAt", req.refundedAt),
                 )
-                val result = blocking { payments.refund(cmd) }
+                val result = payments.refund(cmd)
                 call.respond(if (result.created) HttpStatusCode.Created else HttpStatusCode.OK, result.value.toResponse())
             }
 
