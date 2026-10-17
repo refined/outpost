@@ -31,7 +31,7 @@ With `REFUND_FEE_POLICY=MOR_RETURNS_FEE`, the refunds also debit `fee_revenue` a
 
 This is the model the established ledgers use: TigerBeetle keeps debit/credit counters on each account; Modern Treasury keeps balances on the account with a lock version.
 
-**Balanced, single-currency entries** are enforced in code: the pure `validatedPostings` function checks every entry through `LedgerWriter`, the shared write path for both balance modes. `/v1/ledger/verify` detects anything written around it. A deferred constraint trigger did the same check in the database; profiling showed it ran once per inserted row (5 times per capture) at commit, so it was removed (see [performance.md](performance.md), round 4).
+**Balanced, single-currency entries** are enforced in code: the pure `validatedPostings` function checks every entry through `LedgerWriter`, the shared write path for both balance modes. `/v1/ledger/verify` reconciles account balances against postings; it does not independently validate each journal entry, so writes bypassing the application can violate that invariant without being detected by this check. A deferred constraint trigger did the same entry check in the database; profiling showed it ran once per inserted row (5 times per capture) at commit, so it was removed (see [performance.md](performance.md), round 4).
 
 **Invariants enforced by the database**, not only by the code (see [V1__schema.sql](../src/main/resources/db/migration/V1__schema.sql)):
 - **Append-only history.** Triggers reject `UPDATE`/`DELETE` on postings, entries, payments and refunds; corrections are new entries.

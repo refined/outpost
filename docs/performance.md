@@ -53,7 +53,7 @@ Each change is measured before / after / before again, back to back, with the "b
 
 **1. Drop the deferred balance trigger** (on battery; runs `20261017-152137`, `-153656`, `-155401`).
 - The trigger checked the same journal entry once per inserted row: 5 times per capture.
-- Balance per entry is still enforced in code (`Ledger.validated`, the only write path), and `/v1/ledger/verify` detects anything written around it.
+- Balance per entry is still enforced in code (`validatedPostings` through `LedgerWriter`, the application's write path). `/v1/ledger/verify` reconciles stored account balances against postings; it does not independently check each journal entry's balance.
 
 | Run | stored: capture / hot / mixed | batched-100: capture / hot / mixed | seed s / b, payments/s | SQL statements per capture s / b |
 |---|---|---|---|---|
