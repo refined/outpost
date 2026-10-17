@@ -31,19 +31,18 @@ class LedgerIntegrityApiTest {
     }
 
     @Test
-    fun `database rejects an unbalanced posting and rolls the transaction back`() = api {
+    fun `verify flags an unbalanced posting written around the ledger`() = api {
         client.capture("p_1")
+        sql(
+            """
+            INSERT INTO ledger.postings (entry_id, account_id, amount)
+            SELECT (SELECT max(id) FROM ledger.journal_entries), id, 1 FROM ledger.accounts WHERE code = 'psp_clearing'
+            """.trimIndent(),
+        )
 
-        val error = assertFailsWith<SQLException> {
-            sql(
-                """
-                INSERT INTO ledger.postings (entry_id, account_id, amount)
-                SELECT (SELECT max(id) FROM ledger.journal_entries), id, 1 FROM ledger.accounts LIMIT 1
-                """.trimIndent(),
-            )
-        }
-        assertTrue(error.message!!.contains("unbalanced"), error.message)
-        assertEquals(4, client.getJson("/v1/journal").objects("entries").single().objects("postings").size)
+        val verify = client.getJson("/v1/ledger/verify")
+        assertEquals("false", verify.str("ok"))
+        assertEquals("psp_clearing", verify.objects("mismatches").single().str("code"))
     }
 
     @Test

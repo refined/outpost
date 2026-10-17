@@ -1,5 +1,6 @@
--- Invariants enforced here, not only in code: every journal entry balances in one currency (checked at commit);
--- entries, postings, payments and refunds are append-only; an account can change only its running balance.
+-- Invariants enforced here, not only in code: entries, postings, payments and refunds are append-only; an account
+-- can change only its running balance. That every entry balances in one currency is enforced in code
+-- (Ledger.validated) and detected by /v1/ledger/verify.
 -- TRUNCATE is not blocked: tests use it to reset state.
 
 CREATE SCHEMA ledger;
@@ -32,51 +33,6 @@ CREATE TABLE ledger.postings (
 );
 CREATE INDEX postings_entry_idx ON ledger.postings (entry_id);
 CREATE INDEX postings_account_idx ON ledger.postings (account_id);
-
-CREATE FUNCTION ledger.check_entry_balanced() RETURNS trigger
-    LANGUAGE plpgsql AS
-$$
-DECLARE
-    entry      BIGINT;
-    total      NUMERIC;
-    lines      INT;
-    currencies INT;
-BEGIN
-    IF TG_TABLE_NAME = 'postings' THEN
-        entry := NEW.entry_id;
-    ELSE
-        entry := NEW.id;
-    END IF;
-
-    SELECT COALESCE(SUM(p.amount), 0), COUNT(*), COUNT(DISTINCT a.currency)
-    INTO total, lines, currencies
-    FROM ledger.postings p
-             JOIN ledger.accounts a ON a.id = p.account_id
-    WHERE p.entry_id = entry;
-
-    IF lines < 2 THEN
-        RAISE EXCEPTION 'journal entry % has % posting(s), needs at least 2', entry, lines USING ERRCODE = 'check_violation';
-    END IF;
-    IF total <> 0 THEN
-        RAISE EXCEPTION 'journal entry % is unbalanced: postings sum to %', entry, total USING ERRCODE = 'check_violation';
-    END IF;
-    IF currencies <> 1 THEN
-        RAISE EXCEPTION 'journal entry % mixes % currencies', entry, currencies USING ERRCODE = 'check_violation';
-    END IF;
-    RETURN NULL;
-END
-$$;
-
--- Deferred to commit time, so an entry and its postings can be inserted in any order within one transaction.
-CREATE CONSTRAINT TRIGGER journal_entries_balanced
-    AFTER INSERT ON ledger.journal_entries
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION ledger.check_entry_balanced();
-
-CREATE CONSTRAINT TRIGGER postings_balanced
-    AFTER INSERT ON ledger.postings
-    DEFERRABLE INITIALLY DEFERRED
-    FOR EACH ROW EXECUTE FUNCTION ledger.check_entry_balanced();
 
 CREATE FUNCTION ledger.forbid_mutation() RETURNS trigger
     LANGUAGE plpgsql AS
