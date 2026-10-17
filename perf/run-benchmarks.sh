@@ -4,7 +4,11 @@
 #
 #   perf/run-benchmarks.sh                 # all variants
 #   perf/run-benchmarks.sh pg-batched-100  # one of them
-#   QUICK=1 perf/run-benchmarks.sh ...     # 10k preload only, ladders from 300 rps (~12 min per variant)
+#   QUICK=1 perf/run-benchmarks.sh ...     # 10k preload only, no 100k report
+#   START_RATE=500 perf/run-benchmarks.sh  # where each ladder starts (default 400)
+#
+# A ladder starts at START_RATE and climbs while steps hold; if the first step fails, it steps down until one holds.
+# A step that clearly cannot hold is stopped early (k6 thresholds with abortOnFail).
 #
 # Every variant also gets a profile at a fixed 300 rps: JFR (app CPU, waits on Postgres), docker stats (CPU per
 # container) and pg_stat_statements (SQL per capture).
@@ -19,7 +23,7 @@ OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
 COMPOSE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
 RATES=(200 250 300 350 400 500 600 800 1000 1300 1600)
-[ "${QUICK:-0}" = 1 ] && RATES=(300 400 500 600 800 1000 1300 1600)
+START_RATE=${START_RATE:-400}
 STEP_SECONDS=20
 PROFILE_RPS=300
 PROFILE_SECONDS=40
@@ -89,6 +93,28 @@ profile_variant() {
 
 cpu_avg() { awk -F, -v col="$2" '$col != "" { s += $col; n++ } END { printf "%.2f", (n ? s / n / 100 : 0) }' "$1" 2>/dev/null; }
 
+step() {
+  local f="$OUTDIR/$VARIANT-$1-$2"
+  sample_waits "$f.waits" &
+  local sampler=$!
+  SCRIPT=bench.js k6 -e SCENARIO="$1" -e RATE="$2" -e DURATION=${STEP_SECONDS}s -e ABORT=1 -e OUT="$STAMP/$VARIANT-$1-$2" -e RUN="$1$2"
+  kill "$sampler" 2>/dev/null || true
+  wait "$sampler" 2>/dev/null || true
+}
+
+holds() { grep -q '"holds":true' "$OUTDIR/$VARIANT-$1-$2.json" 2>/dev/null; }
+
+ladder() {
+  local s=$1 i start=0
+  for i in "${!RATES[@]}"; do if [ "${RATES[$i]}" -ge "$START_RATE" ]; then start=$i; break; fi; done
+  step "$s" "${RATES[$start]}"
+  if holds "$s" "${RATES[$start]}"; then
+    for ((i = start + 1; i < ${#RATES[@]}; i++)); do step "$s" "${RATES[$i]}"; holds "$s" "${RATES[$i]}" || break; done
+  else
+    for ((i = start - 1; i >= 0; i--)); do step "$s" "${RATES[$i]}"; holds "$s" "${RATES[$i]}" && break; done
+  fi
+}
+
 reset_stack() {
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
   docker volume rm -f outpost_pgdata >/dev/null 2>&1 || true
@@ -113,15 +139,8 @@ run_variant() {
     SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-100k"
   fi
 
-  # Throughput ladders: raise the arrival rate until a step no longer holds (keeps up, p95 < 250 ms, < 1% errors).
-  for scenario in capture hot mixed; do
-    for rate in "${RATES[@]}"; do
-      sample_waits "$OUTDIR/$VARIANT-$scenario-$rate.waits" &
-      SCRIPT=bench.js k6 -e SCENARIO=$scenario -e RATE="$rate" -e DURATION=${STEP_SECONDS}s -e OUT="$STAMP/$VARIANT-$scenario-$rate" -e RUN="$scenario$rate"
-      wait
-      grep -q '"holds":true' "$OUTDIR/$VARIANT-$scenario-$rate.json" 2>/dev/null || break
-    done
-  done
+  # Throughput ladders: the highest arrival rate that holds (keeps up, p95 < 250 ms, < 1% errors).
+  for scenario in capture hot mixed; do ladder "$scenario"; done
 
   profile_variant
 

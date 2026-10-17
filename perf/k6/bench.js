@@ -19,6 +19,9 @@ const RUN = __ENV.RUN || `b${Date.now().toString(36)}`;
 const OUT = __ENV.OUT || `${SCENARIO}-${RATE}`;
 const MERCHANTS = merchants(7, 100);
 const NOW = Date.now();
+const SECONDS = Number(DURATION.replace(/s$/, ''));
+// ABORT=1 (ladder steps): stop a step as soon as it clearly cannot hold, instead of waiting out its duration.
+const ABORT = __ENV.ABORT === '1';
 
 export const options = {
   discardResponseBodies: true,
@@ -33,6 +36,13 @@ export const options = {
     },
   },
   summaryTrendStats: ['avg', 'p(50)', 'p(95)', 'p(99)', 'max'],
+  thresholds: ABORT
+    ? {
+        http_req_duration: [{ threshold: 'p(95)<250', abortOnFail: true, delayAbortEval: '5s' }],
+        checks: [{ threshold: 'rate>0.99', abortOnFail: true, delayAbortEval: '5s' }],
+        dropped_iterations: [{ threshold: `count<${Math.ceil(RATE * SECONDS * 0.05)}`, abortOnFail: true }],
+      }
+    : {},
 };
 
 const mine = []; // per-VU: payments this VU captured, candidates for refunds in the mixed scenario
@@ -83,10 +93,11 @@ export function handleSummary(data) {
     errorRate: m.checks ? Math.round((1 - m.checks.values.rate) * 10000) / 10000 : 0,
     dropped: m.dropped_iterations ? m.dropped_iterations.values.count : 0,
   };
-  // A step "holds" when it keeps up with the target rate, with p95 under 250 ms and under 1% errors.
-  row.holds = row.achievedRps >= RATE * 0.95 && row.p95 < 250 && row.errorRate < 0.01;
+  // A step "holds" when it keeps up with the target rate for its whole duration, with p95 under 250 ms and under 1% errors.
+  row.seconds = Math.round(seconds);
+  row.holds = iterations >= RATE * SECONDS * 0.95 && row.p95 < 250 && row.errorRate < 0.01;
   return {
     [`/results/${OUT}.json`]: JSON.stringify(row) + '\n',
-    stdout: `${row.variant} ${row.scenario} target=${RATE}/s achieved=${row.achievedRps}/s p50=${row.p50}ms p95=${row.p95}ms p99=${row.p99}ms errors=${(row.errorRate * 100).toFixed(2)}% dropped=${row.dropped} ${row.holds ? 'HOLDS' : 'SATURATED'}\n`,
+    stdout: `${row.variant} ${row.scenario} target=${RATE}/s achieved=${row.achievedRps}/s p50=${row.p50}ms p95=${row.p95}ms p99=${row.p99}ms errors=${(row.errorRate * 100).toFixed(2)}% dropped=${row.dropped} ${row.seconds}s ${row.holds ? 'HOLDS' : 'SATURATED'}\n`,
   };
 }

@@ -20,12 +20,18 @@ How fast can the service take captures and refunds, and does the way balances ar
 
 1. **Warm-up:** 15 s at 200 rps, not reported.
 2. **Preload and report latency:** seed 10k payments, then measure `GET /v1/reports/balances` at 20 rps; seed up to 100k payments and measure again. The seed is closed-loop (24 virtual users), so its throughput doubles as a bulk-ingest number.
-3. **Throughput ladders:** a constant arrival rate (open loop) of 200, 250, 300, 350, 400, 500… rps, 20 s per step, until a step fails. A step **holds** if it keeps up with the target (≥ 95%), with p95 < 250 ms and < 1% errors. There are three scenarios:
+3. **Throughput ladders:** a constant arrival rate (open loop), 20 s per step. A step **holds** if it keeps up with the target (≥ 95% of the planned requests), with p95 < 250 ms and < 1% errors. There are three scenarios (listed below).
+   - Rounds 1–3 climbed 200, 250, 300, 350, 400, 500… until a step failed.
+   - From round 4 a ladder starts at 400 and climbs while steps hold; if 400 fails, it steps down until one holds. A step that clearly cannot hold stops early (k6 thresholds with `abortOnFail`: too many dropped requests, or p95 or errors over the limit after 5 s).
+
+   The scenarios:
    - `capture`: payments spread over 100 merchants and 3 currencies;
    - `hot`: every payment to one merchant in one jurisdiction, the worst case for shared rows;
    - `mixed`: 85% captures, 10% partial refunds, 5% balance reports.
 4. **Waits (round 2):** during every step, `pg_stat_activity` is sampled every 200 ms. The result is the share of active Postgres backends waiting on a row lock, and on IO (mostly the WAL flush at commit).
-5. **Consistency:** after each variant, `/v1/ledger/verify` and the report's integrity check must pass, and every merchant must reconcile. All variants in both rounds did.
+5. **Profile (round 4):** at a fixed 300 captures/s, a 40 s step without a profiler gives CPU per container (`docker stats`) and SQL per capture (`pg_stat_statements`). The app then restarts with JFR for a second 40 s step, used only for proportions: where the app's CPU goes and which calls wait on Postgres ([`perf/analyse-jfr.sh`](../perf/analyse-jfr.sh)). JFR is not left on during the ladders: it cost `STORED` a whole step.
+6. **Consistency:** after each variant, `/v1/ledger/verify` and the report's integrity check must pass, and every merchant must reconcile. All variants in every round did.
+7. **Comparing a change (round 4): A-B-A.** The laptop's speed drifts (battery, power mode, temperature), so a change is measured as before / after / before again, back to back, with the "before" code in a separate git worktree. A change counts only if "after" beats both "before" runs.
 
 **Why k6 and not Kotlin?**
 - k6 is a load generator with a Go engine; only the scenarios are JavaScript.
