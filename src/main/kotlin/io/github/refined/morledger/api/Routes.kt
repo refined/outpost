@@ -5,6 +5,7 @@ import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.payments.CaptureCommand
 import io.github.refined.morledger.payments.PaymentService
+import io.github.refined.morledger.payments.validateCurrency
 import io.github.refined.morledger.payments.PaymentStatus
 import io.github.refined.morledger.payments.RefundCommand
 import io.github.refined.morledger.payments.ValidationException
@@ -115,7 +116,7 @@ fun Application.routes(
 
             get("/reports/balances") {
                 val asOf = instant("asOf", call.request.queryParameters["asOf"])
-                val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
+                val currency = call.request.queryParameters["currency"]?.let { validateCurrency(it) }
                 call.respond(blocking { reports.build(asOf, currency) }.toResponse())
             }
 
@@ -129,7 +130,7 @@ fun Application.routes(
             }
 
             get("/ledger/accounts") {
-                val currency = call.request.queryParameters["currency"]?.let { PaymentService.validateCurrency(it) }
+                val currency = call.request.queryParameters["currency"]?.let { validateCurrency(it) }
                 val accounts = blocking { dataSource.transaction { ledger.balances(it, null, currency) } }
                 call.respond(AccountsResponse(accounts.map { AccountDto(it.account.code, it.account.currency, it.account.normalSide.name, it.balance) }))
             }

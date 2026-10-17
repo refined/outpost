@@ -5,7 +5,10 @@
 services:
   app:
     environment:
-      JAVA_OPTS: -XX:MaxRAMPercentage=70 -XX:+UseG1GC
+      # JFR keeps the last 60 s and writes them when the app stops: the runner stops it right after the profile step.
+      JAVA_OPTS: >-
+        -XX:MaxRAMPercentage=70 -XX:+UseG1GC
+        -XX:StartFlightRecording=settings=profile,jdk.ExecutionSample#period=2ms,disk=true,maxage=60s,dumponexit=true,filename=/tmp/app.jfr
     deploy:
       resources:
         limits:
@@ -13,7 +16,8 @@ services:
           memory: ${APP_MEM:-1280M}
 
   postgres:
-    command: ["postgres", "-c", "shared_buffers=${PG_SHARED_BUFFERS:-256MB}", "-c", "max_connections=50"]
+    command: ["postgres", "-c", "shared_buffers=${PG_SHARED_BUFFERS:-256MB}", "-c", "max_connections=50",
+              "-c", "shared_preload_libraries=pg_stat_statements"]
     deploy:
       resources:
         limits:

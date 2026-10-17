@@ -1,6 +1,6 @@
 package io.github.refined.morledger.api
 
-import io.github.refined.morledger.payments.PaymentService
+import io.github.refined.morledger.payments.validateCurrency
 import io.github.refined.morledger.payments.ValidationException
 import io.github.refined.morledger.reports.Analytics
 import io.github.refined.morledger.reports.CurrencySummary
@@ -107,7 +107,7 @@ fun Route.analyticsRoutes(analytics: Analytics) {
     route("/analytics") {
         get("/summary") {
             val q = call.request.queryParameters
-            val currency = q["currency"]?.let { PaymentService.validateCurrency(it) }
+            val currency = q["currency"]?.let { validateCurrency(it) }
             val from = instant("from", q["from"])
             val to = instant("to", q["to"])
             val summary = blocking { analytics.summary(currency, from, to) }
@@ -116,7 +116,7 @@ fun Route.analyticsRoutes(analytics: Analytics) {
 
         get("/timeseries") {
             val q = call.request.queryParameters
-            val currency = PaymentService.validateCurrency(q["currency"] ?: throw ValidationException("currency is required"))
+            val currency = validateCurrency(q["currency"] ?: throw ValidationException("currency is required"))
             val bucket = Analytics.parseBucket(q["bucket"])
             val merchantId = q["merchantId"]
             val from = instant("from", q["from"])
@@ -127,7 +127,7 @@ fun Route.analyticsRoutes(analytics: Analytics) {
 
         get("/merchants") {
             val q = call.request.queryParameters
-            val currency = q["currency"]?.let { PaymentService.validateCurrency(it) }
+            val currency = q["currency"]?.let { validateCurrency(it) }
             val search = q["q"]?.takeIf { it.isNotBlank() }
             val sort = Analytics.parseSort(q["sort"])
             val limit = intParam("limit", q["limit"], default = 50, range = 1..500)

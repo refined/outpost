@@ -4,6 +4,10 @@
 #
 #   perf/run-benchmarks.sh                 # all variants
 #   perf/run-benchmarks.sh pg-batched-100  # one of them
+#   QUICK=1 perf/run-benchmarks.sh ...     # 10k preload only, ladders from 300 rps (~12 min per variant)
+#
+# Every variant also gets a profile at a fixed 300 rps: JFR (app CPU, waits on Postgres), docker stats (CPU per
+# container) and pg_stat_statements (SQL per capture).
 #
 # Needs only Docker and bash (Git Bash on Windows). Each variant starts from empty volumes.
 set -euo pipefail
@@ -15,7 +19,10 @@ OUTDIR="perf/results/$STAMP"
 mkdir -p "$OUTDIR"
 COMPOSE=(docker compose -f docker-compose.yml -f perf/compose.limits.yml --profile tools)
 RATES=(200 250 300 350 400 500 600 800 1000 1300 1600)
+[ "${QUICK:-0}" = 1 ] && RATES=(300 400 500 600 800 1000 1300 1600)
 STEP_SECONDS=20
+PROFILE_RPS=300
+PROFILE_SECONDS=40
 
 LIMITS="APP_CPUS=1.0 APP_MEM=1280M PG_CPUS=1.0 PG_MEM=1792M PG_SHARED_BUFFERS=448MB"
 variant_env() {
@@ -44,6 +51,36 @@ SQL
 # Share of active backend samples that were waiting: column 2 = row locks, column 3 = IO (mostly WAL flush on commit).
 wait_share() { awk -F, -v col="$2" '/^[0-9]+,[0-9]+,[0-9]+$/ { a += $1; w += $col } END { printf "%d%%", (a ? 100 * w / a : 0) }' "$1" 2>/dev/null || echo "?"; }
 
+psql_q() { "${COMPOSE[@]}" exec -T postgres psql -U mor -d mor_ledger -At -F'|' -c "$1"; }
+
+# docker stats once a second: "app CPU %,postgres CPU %" per line (100% = one core).
+sample_cpu() {
+  local end=$((SECONDS + PROFILE_SECONDS))
+  while [ $SECONDS -lt $end ]; do
+    docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' outpost-app-1 outpost-postgres-1 |
+      awk '{ gsub("%", "", $2); v[$1] = $2 } END { print v["outpost-app-1"] "," v["outpost-postgres-1"] }'
+  done > "$1"
+}
+
+profile_variant() {
+  local base="$OUTDIR/$VARIANT-profile"
+  psql_q "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
+  psql_q "SELECT pg_stat_statements_reset()" >/dev/null
+  sample_cpu "$base.cpu" &
+  SCRIPT=bench.js k6 -e SCENARIO=capture -e RATE=$PROFILE_RPS -e DURATION=${PROFILE_SECONDS}s -e OUT="$STAMP/$VARIANT-profile" -e RUN=profile
+  wait
+  psql_q "SELECT calls, round(total_exec_time), left(regexp_replace(query, '\s+', ' ', 'g'), 80)
+          FROM pg_stat_statements WHERE query !~ 'pg_stat|pg_extension' ORDER BY total_exec_time DESC" > "$base.sql"
+  "${COMPOSE[@]}" stop app >/dev/null 2>&1
+  docker cp outpost-app-1:/tmp/app.jfr "$base.jfr" >/dev/null
+  "${COMPOSE[@]}" up -d --wait --no-deps app >/dev/null 2>&1
+  docker run --rm -v "$(cd "$OUTDIR" && (pwd -W 2>/dev/null || pwd))":/data -v "$(cd perf && (pwd -W 2>/dev/null || pwd))":/perf:ro \
+    gradle:9.8.1-jdk21 sh /perf/analyse-jfr.sh "/data/$VARIANT-profile.jfr" > "$base.txt" 2>&1 || true
+  echo "  profile: $(cpu_avg "$base.cpu" 1) app / $(cpu_avg "$base.cpu" 2) postgres cores at $PROFILE_RPS rps"
+}
+
+cpu_avg() { awk -F, -v col="$2" '$col != "" { s += $col; n++ } END { printf "%.2f", (n ? s / n / 100 : 0) }' "$1" 2>/dev/null; }
+
 reset_stack() {
   "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
   docker volume rm -f outpost_pgdata >/dev/null 2>&1 || true
@@ -63,8 +100,10 @@ run_variant() {
   # Read latency of the balances report at two data sizes (closed-loop seed = bulk ingest throughput).
   SCRIPT=seed.js k6 -e PAYMENTS=10000 -e PREFIX=pre -e OUT="$STAMP/$VARIANT-seed-10k"
   SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-10k"
-  SCRIPT=seed.js k6 -e PAYMENTS=90000 -e PREFIX=pre2 -e OUT="$STAMP/$VARIANT-seed-100k"
-  SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-100k"
+  if [ "${QUICK:-0}" != 1 ]; then
+    SCRIPT=seed.js k6 -e PAYMENTS=90000 -e PREFIX=pre2 -e OUT="$STAMP/$VARIANT-seed-100k"
+    SCRIPT=bench.js k6 -e SCENARIO=report -e RATE=20 -e DURATION=20s -e OUT="$STAMP/$VARIANT-report-100k"
+  fi
 
   # Throughput ladders: raise the arrival rate until a step no longer holds (keeps up, p95 < 250 ms, < 1% errors).
   for scenario in capture hot mixed; do
@@ -75,6 +114,8 @@ run_variant() {
       grep -q '"holds":true' "$OUTDIR/$VARIANT-$scenario-$rate.json" 2>/dev/null || break
     done
   done
+
+  profile_variant
 
   # The books must still balance after all of it.
   {
@@ -115,10 +156,34 @@ summarise() {
     echo
     echo "## Bulk ingest and report latency"
     echo
-    echo "| Variant | seed 100k: payments/s | report p50 / p95 @ 10k payments | report p50 / p95 @ 100k payments |"
+    echo "| Variant | seed: payments/s | report p50 / p95 @ 10k payments | report p50 / p95 @ 100k payments |"
     echo "|---|---|---|---|"
     for v in "$@"; do
-      echo "| $v | $(field "$OUTDIR/$v-seed-100k.json" paymentsPerSecond) | $(field "$OUTDIR/$v-report-10k.json" p50) / $(field "$OUTDIR/$v-report-10k.json" p95) ms | $(field "$OUTDIR/$v-report-100k.json" p50) / $(field "$OUTDIR/$v-report-100k.json" p95) ms |"
+      seed="$OUTDIR/$v-seed-100k.json"; [ -f "$seed" ] || seed="$OUTDIR/$v-seed-10k.json"
+      echo "| $v | $(field "$seed" paymentsPerSecond) | $(field "$OUTDIR/$v-report-10k.json" p50) / $(field "$OUTDIR/$v-report-10k.json" p95) ms | $(field "$OUTDIR/$v-report-100k.json" p50) / $(field "$OUTDIR/$v-report-100k.json" p95) ms |"
+    done
+    echo
+    echo "## Profile at $PROFILE_RPS captures/s"
+    echo
+    echo "| Variant | achieved | p95 | app CPU (cores) | app CPU ms / request | Postgres CPU (cores) | SQL statements / capture | SQL ms / capture |"
+    echo "|---|---|---|---|---|---|---|---|"
+    for v in "$@"; do
+      b="$OUTDIR/$v-profile"; [ -f "$b.json" ] || continue
+      rps=$(field "$b.json" achievedRps); app=$(cpu_avg "$b.cpu" 1); pg=$(cpu_avg "$b.cpu" 2)
+      captures=$(awk -F'|' '$3 ~ /^INSERT INTO payments/ { print $1 }' "$b.sql" | head -1)
+      sql=$(awk -F'|' -v c="${captures:-0}" '{ n += $1; ms += $2 } END { if (c) printf "%.1f|%.2f", n / c, ms / c; else printf "?|?" }' "$b.sql")
+      echo "| $v | $rps/s | $(field "$b.json" p95) ms | $app | $(awk -v a="$app" -v r="$rps" 'BEGIN { printf "%.2f", r ? 1000 * a / r : 0 }') | $pg | ${sql%|*} | ${sql#*|} |"
+    done
+    for v in "$@"; do
+      b="$OUTDIR/$v-profile"; [ -f "$b.txt" ] || continue
+      echo
+      echo "### $v"
+      echo
+      echo '```'
+      cat "$b.txt"
+      echo "Top SQL (calls | total ms | statement):"
+      head -6 "$b.sql" | sed 's/^/  /'
+      echo '```'
     done
     echo
     echo "## All steps"
