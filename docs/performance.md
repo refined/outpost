@@ -1,15 +1,20 @@
 # Performance: ledger variants under one budget
 
-How fast can the service take captures and refunds, and does the way balances are kept change that? Everything below ran on the same code, data and resource budget, in three rounds, newest first:
+How fast can the service take captures and refunds, and does the way balances are kept change that? Everything below ran on the same code, data and resource budget, in four rounds, newest first:
 
-1. **Round 3:** the two modes in the code after profiling found the real limit: database work blocking Ktor's 3 request threads. Fixed with an IO dispatcher.
-2. **Round 2:** `STORED` (default) and `BATCHED` (group commit), with lock and IO waits sampled from Postgres; still limited by those 3 threads.
-3. **Round 1:** six earlier variants. Four were removed afterwards; their code is at commit `0ffcf3f`.
+1. **Round 4:** three changes suggested by profiling, each measured before / after / before:
+   - dropping the deferred balance trigger;
+   - `await` in the batch commit;
+   - batched inserts in the driver.
+2. **Round 3:** the two modes in the code after profiling found the real limit: database work blocking Ktor's 3 request threads. Fixed with an IO dispatcher.
+3. **Round 2:** `STORED` (default) and `BATCHED` (group commit), with lock and IO waits sampled from Postgres; still limited by those 3 threads.
+4. **Round 1:** six earlier variants. Four were removed afterwards; their code is at commit `0ffcf3f`.
 
 ## Setup
 
 - **Budget:** 2 CPUs and 3 GB for the whole system under test, set with Docker limits ([`perf/compose.limits.yml`](../perf/compose.limits.yml)): app 1.0 CPU / 1280 MB, Postgres 1.0 CPU / 1792 MB (`shared_buffers` 448 MB). A limit is a CPU-time quota (cgroups), not pinned cores. The load generator runs outside the limit.
 - **Host:** Docker Desktop 29.1.3 on Windows 11, a 16-CPU / 16 GB VM.
+  - **Round 4** ran with no other containers. The trigger experiment ran on battery ("Silent" power mode); the others ran on mains power ("Performance"), where everything is about twice as fast.
   - **Round 3** ran next to the (mostly idle) sharetravel containers.
   - **Round 2** ran with no other containers.
   - **Round 1** ran next to other projects' containers.
@@ -38,6 +43,66 @@ How fast can the service take captures and refunds, and does the way balances ar
 - It runs from one Docker image with no build step.
 - Its arrival-rate executor starts requests on schedule even when the service slows down, so latency is not hidden by coordinated omission.
 - The Kotlin-native equivalent is Gatling (Java/Kotlin DSL, Gradle plugin). A home-made loop on coroutines would measure the wrong thing.
+
+## Round 4: profiling-guided changes, measured A-B-A
+
+Each change is measured before / after / before again, back to back, with the "before" code in a separate git worktree (see Method).
+- The first experiment (the trigger) ran on battery, in the laptop's "Silent" power mode.
+- The other two ran on mains power, in "Performance" mode.
+- Numbers from different power states must not be compared: on mains power every variant holds about twice as much.
+
+**1. Drop the deferred balance trigger** (on battery; runs `20261017-152137`, `-153656`, `-155401`).
+- The trigger checked the same journal entry once per inserted row: 5 times per capture.
+- Balance per entry is still enforced in code (`Ledger.validated`, the only write path), and `/v1/ledger/verify` detects anything written around it.
+
+| Run | stored: capture / hot / mixed | batched-100: capture / hot / mixed | seed s / b, payments/s | SQL statements per capture s / b |
+|---|---|---|---|---|
+| before | 400 / 297 / 299 | 400 / 399 / 496 | 284 / 372 | 18 / 19 |
+| **after** | **500 / 400 / 500** | **600 / 599 / 597** | **407 / 521** | **13 / 14.8** |
+| before | 400 / — / 300 | — / 296 / 495 | 295 / 298 | 18 / 16.4 |
+
+"After" beats both "before" runs everywhere. The battery was draining, so the second "before" is the weakest. Postgres CPU at 300 captures/s fell from 0.52 to 0.41 cores for `STORED`.
+
+**2. `await` instead of `get()` in the batch commit** (`BATCHED` only, on mains power; runs `20261017-181905`, `-182744`, `-183640`).
+
+| Run | capture / hot / mixed | seed, payments/s | app CPU ms per request @300 | Postgres CPU @300 |
+|---|---|---|---|---|
+| before | 1000 / 1000 / 800 | 814 | 0.63 | 0.28 |
+| **after** | **1000 / 1000 / 1000** | **940** | **0.50** | **0.25** |
+| before | 1000 / 1000 / 1000 | 857 | 0.57 | 0.27 |
+
+The ceiling did not move within the ladder's resolution: every run holds 1000 and fails at 1300. A request waiting for its batch no longer holds a thread, so the app spends 12–20% less CPU per request and bulk ingest is 10–15% faster. A modest but consistent gain.
+
+**3. `reWriteBatchedInserts=true`** (both modes, on mains power; runs `20261017-184658`, `-190332`, `-192003`). The driver sends a capture's 4 postings as one multi-row `INSERT`.
+
+| Run | stored: capture / hot / mixed | batched-100: capture / hot / mixed | seed s / b | SQL statements per capture s / b |
+|---|---|---|---|---|
+| before | 800 / 600 / 800 | 1000 / 1000 / 1000 | 540 / 864 | 13 / 15 |
+| **after** | **800 / 600 / 800** | **1000 / 1000 / 1000** | **678 / 873** | **10 / 12** |
+| before | 800 / 600 / 800 | 1000 / 1000 / 1000 | 660 / 961 | 13 / 15 |
+
+Three statements fewer per capture, and nothing else measurable: the ceilings are identical, and the seed difference is within the spread of the two "before" runs. Kept, because it costs nothing and removes round trips.
+
+**Where things stand** (mains power):
+- **`STORED` holds 800 / 600 / 800 rps.** Its limit is the hot accounts' row locks: in the one-merchant scenario 64–69% of active Postgres backends wait on a lock.
+- **`BATCHED` holds ~1000 rps in every scenario, with 0% lock waits.** It fails at the next step (1300).
+- **Profile of `STORED` at 300 captures/s,** where Postgres waits break down as:
+
+  | Share | Where |
+  |---|---|
+  | 38% | commit (WAL flush) |
+  | 27% | balance `UPDATE`s |
+  | 15% | `Ledger.post` |
+  | 10% | `insertPayment` |
+
+  The app's CPU splits into Ktor/Netty 43%, our code 23%, coroutines 13%, JDBC 12%, JSON 7%.
+
+**Not done: grouping a batch's SQL by hand.** `BATCHED` still runs ~12 statements per request, one after another, on the writer's connection. Grouping them means:
+- one multi-row `INSERT` per table per batch;
+- idempotency via `INSERT … ON CONFLICT DO NOTHING RETURNING` for the whole batch;
+- a separate batched path for refunds, which lock and read their payment first.
+
+That is a rewrite of `PaymentService`'s write path for one mode, so it is skipped. At ~1000 rps on 2 CPUs the service is far above its expected load.
 
 ## Round 3: database work off the request threads
 
@@ -75,10 +140,7 @@ Lock / IO waits at the saturating step, `STORED`: 68% / 15% on capture at 500 rp
 - **Bulk ingest rose too:** stored 271 → 415, batched 314 → 470 payments/s.
 - **This is what makes sharding meaningful again.** With measured lock waits on `STORED`, splitting hot accounts (merchant rows included) is now a real alternative to group commit. Group commit already removes the waits without changing the chart of accounts.
 
-**Not done yet** (each was measured in the profile, none needed at this scale):
-- check an entry's balance once instead of on every posting (the deferred trigger runs 5 times per capture, 25% of SQL time);
-- build the capture response without re-reading the payment;
-- batch the SQL itself (multi-row inserts per batch).
+**Followed up in round 4:** the trigger, `await` and batched inserts. The read-back after a write stays: it doubles as a check of what was stored.
 
 ## Round 2: stored balances vs group commit
 
@@ -171,8 +233,8 @@ Both runs failed at 400 rps. The second run's capture result is a stall, not a t
 
 ## What we kept
 
-- **`STORED`** (default): one transaction per request; simple and exact. On this budget it holds 300–500 rps; the limit is the hot accounts' row locks.
-- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BATCH_MAX_SIZE`, `BATCH_MAX_WAIT_MS`): group commit, still exact and synchronous; 600–800 rps at batch size 100, with no lock waits.
+- **`STORED`** (default): one transaction per request; simple and exact. On this budget, on mains power, it holds 600–800 rps; the limit is the hot accounts' row locks.
+- **`BATCHED`** (`BALANCE_MODE=BATCHED`, `BATCH_MAX_SIZE`, `BATCH_MAX_WAIT_MS`): group commit, still exact and synchronous; ~1000 rps at batch size 100, with no lock waits.
 
 To reproduce:
 

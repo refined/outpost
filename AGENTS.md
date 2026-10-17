@@ -189,7 +189,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 12 | Concurrency | Refund = `SELECT … FOR UPDATE` on the payment; capture = `INSERT … ON CONFLICT DO NOTHING` + fingerprint compare |
 | 13 | Time | `effective_at` (event time, `asOf` filters on it) and `recorded_at`; future event times → 400 (5 min skew) |
 | 14 | JSON | Strict: unknown fields → 400; amounts are integers; rates are decimal strings |
-| 15 | Ledger engine | Own, on Postgres; DB enforces balance (deferred constraint trigger) and append-only history (triggers); on accounts only `balance` may change; TRUNCATE allowed for tests |
+| 15 | Ledger engine | Own, on Postgres; DB enforces append-only history (triggers) and that accounts only change their `balance`; TRUNCATE allowed for tests. Entry balance is enforced in code (`Ledger.validated`, single write path) and detected by `verify`; the deferred balance trigger was dropped on 2026-10-17 (it ran 5× per capture at commit) |
 | 16 | Demo | `/ui` vanilla JS console + `/docs` Swagger (swagger-ui-dist from jsDelivr, pinned 5.33.0); no extra Gradle dependency |
 | 17 | Runtime | Everything in Docker: app image + Postgres via compose; tests via the compose `test` profile; CI has a `docker` job (build, smoke test, tests in Docker) |
 | 18 | Balances | Stored running `balance` per account, updated in the same tx via atomic `UPDATE … balance = balance + x`, accounts locked in id order as the last statements; the current report reads it; `asOf` sums postings; `Ledger.verify` reconciles (used in tests). Rejected: SUM on read, snapshots, queue-fed balances, optimistic locking, app-level locks (see README Trade-offs) |
@@ -203,6 +203,8 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 26 | Demo data | `perf/k6/seed.js`: deterministic (SEED), idempotent (PREFIX); ~100 Zipf-sized merchants, 3 currencies, 9 jurisdictions, ~7% refunds, 4 refund-heavy anomalies |
 | 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; pg_stat_activity is sampled every 200 ms per step (share of active backends waiting on Lock / IO) |
 | 28 | Blocking JDBC in Ktor | Route handlers run database work in `blocking { }` = `withContext(Dispatchers.IO)` (`api/Routes.kt`). With a 1-CPU container Ktor has only 3 request threads; blocking JDBC on them capped concurrency at 3 (found with JFR, 2026-10-17). Next steps if needed: virtual threads, then an async driver |
+| 29 | Batch commit wait | `LedgerBatchCommit.submit` is `suspend` and awaits its batch (`CompletableFuture.await`); a waiting request holds no thread. `PaymentService.capture/refund` are `suspend`; `STORED` runs on `Dispatchers.IO` inside the service |
+| 30 | JDBC batching | Hikari property `reWriteBatchedInserts=true`: a capture's postings go as one multi-row INSERT. Measured neutral on throughput, kept for fewer round trips. Grouping a whole batch's SQL by hand was estimated and skipped |
 
 ## Ideas not done (candidates if time allows)
 

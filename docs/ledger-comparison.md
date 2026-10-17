@@ -42,10 +42,12 @@ We built `TigerBeetleLedger` as a second implementation of the ledger interface,
 
 ## Measured under the same budget
 
-2 CPUs and 3 GB for the whole system under test. Full method and numbers: [performance.md](performance.md). Compare variants within a round. Rounds 1 and 2 were limited by blocking JDBC on 3 request threads (found by profiling); round 3 has that fixed.
+2 CPUs and 3 GB for the whole system under test. Full method and numbers: [performance.md](performance.md). Compare variants within a round. Rounds 1 and 2 were limited by blocking JDBC on 3 request threads (found by profiling); round 3 has that fixed. Round 4 adds three profiling-guided changes and ran on mains power, where everything is about twice as fast as on battery.
 
 | Variant | Round | Highest holding rate: capture / hot merchant / mixed | Balance report @ 100k payments (p95) | Read staleness |
 |---|---|---|---|---|
+| Postgres, stored balances | 4 | 800 / 600 / 800 rps | 3 ms | none |
+| Postgres, group commit, batches of 100 | 4 | 1000 / 1000 / 1000 rps | 2 ms | none |
 | Postgres, stored balances | 3 | 400 / 300 / 500 rps | 3 ms | none |
 | Postgres, group commit, batches of 100 | 3 | 599 / 794 / 600 rps | 2 ms | none |
 | Postgres, stored balances | 2 | 299 / 299 / 300 rps | 2 ms | none |
@@ -63,7 +65,7 @@ Once requests really run concurrently (round 3), `STORED` saturates on the hot a
 
 **Our own ledger on Postgres, with stored balances.** It is the only option where the payment, its idempotency record and its journal entry commit in one transaction, and it adds nothing to operate.
 
-- **Next step when throughput matters:** `BALANCE_MODE=BATCHED`, kept in the code. Group commit runs queued requests in batches: one transaction, one commit and one balance update per account per batch, with a savepoint per request. Balances stay exact and synchronous; at batch size 100 it held 600–800 rps where stored balances held 300–500, on this budget. The step after that is batching the SQL itself (multi-row inserts per batch).
+- **Next step when throughput matters:** `BALANCE_MODE=BATCHED`, kept in the code. Group commit runs queued requests in batches: one transaction, one commit and one balance update per account per batch, with a savepoint per request. Balances stay exact and synchronous; at batch size 100 it holds ~1000 rps where stored balances hold 600–800, on this budget. The step after that is batching the SQL itself (multi-row inserts per batch); estimated and not needed at this scale.
 - **Removed after measuring:**
   - summed-on-read balances: reads grow with history;
   - snapshot + tail: the read cost was paid on every report;

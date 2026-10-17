@@ -31,8 +31,9 @@ With `REFUND_FEE_POLICY=MOR_RETURNS_FEE`, the refunds also debit `fee_revenue` a
 
 This is the model the established ledgers use: TigerBeetle keeps debit/credit counters on each account; Modern Treasury keeps balances on the account with a lock version.
 
+**Balanced, single-currency entries** are enforced in code: `Ledger.validated` checks every entry before it is written, and it is the only write path. `/v1/ledger/verify` detects anything written around it. A deferred constraint trigger did the same check in the database; profiling showed it ran once per inserted row (5 times per capture) at commit, so it was removed (see [performance.md](performance.md), round 4).
+
 **Invariants enforced by the database**, not only by the code (see [V1__schema.sql](../src/main/resources/db/migration/V1__schema.sql)):
-- **Balanced, single-currency entries.** A deferred constraint trigger checks that every journal entry balances and uses a single currency, at commit time.
 - **Append-only history.** Triggers reject `UPDATE`/`DELETE` on postings, entries, payments and refunds; corrections are new entries.
 - **Fixed account identity.** On accounts, only `balance` may change.
 - **Splits add up.** `CHECK`s require each payment's and refund's parts to sum to its amount.
@@ -111,7 +112,7 @@ Where the brief is open, these are the decisions and why.
 - **Formance Ledger**
   - What it offers: a ready ledger API, Numscript for splits (including rounding allotments), and built-in audit history.
   - What it costs: a separate service to run, the same dual-write problem, and the domain rules would live in Numscript instead of tested Kotlin.
-- **Our engine** is small and sits behind one module (`Ledger`) that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (deferred balance check, append-only triggers).
+- **Our engine** is small and sits behind one module (`Ledger`) that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (append-only triggers, fixed account identity).
 
 **Running balances, updated synchronously.**
 - **Chosen:** the stored balance changes in the same transaction as its postings.
@@ -124,7 +125,7 @@ Where the brief is open, these are the decisions and why.
 - **Kept as an option: group commit (`BATCHED`).** Still synchronous and exact, but a batch of requests shares one commit and one balance update per account.
 - **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
 
-The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is `STORED`'s limit once requests run concurrently: in the one-merchant scenario, 84% of active Postgres backends wait on a lock at ~350 rps. Group commit (`BATCHED`) takes each balance row once per batch and held 600–800 rps. The remedies, in the order to reach for them:
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is `STORED`'s limit once requests run concurrently: in the one-merchant scenario `STORED` holds 600 rps, with 64–69% of active Postgres backends waiting on a lock. Group commit (`BATCHED`) takes each balance row once per batch and holds ~1000 rps in every scenario (round 4 in performance.md). The remedies, in the order to reach for them:
 - `BALANCE_MODE=BATCHED` (in the code): group commit, one commit and one balance update per account per batch;
 - splitting a hot account into N sub-accounts (measured before the request-thread fix, then removed; worth revisiting);
 - moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
@@ -191,7 +192,7 @@ The integration suite covers:
 - **API flows**: both fee policies, partial refunds, idempotent replays and conflicts, guards, multi-currency, `asOf`, analytics, validation.
 - **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
 - **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; in a batch, a conflicting capture and an over-refund fail alone while their neighbours commit; concurrent batched captures lose nothing.
-- **Database invariants**: data goes in through the API, then raw SQL tries to go around it: unbalanced postings are rejected at commit, history is append-only, and a drifted stored balance shows up in `/v1/ledger/verify`.
+- **Database invariants**: data goes in through the API, then raw SQL tries to go around it: history is append-only, and an unbalanced posting or a drifted stored balance shows up in `/v1/ledger/verify`.
 - **Ledger level** (`ledger/`, the only test below the API): `LedgerBatchCommit` with a batch composed on purpose: 20 requests, one failing after it wrote its entry; the other 19 commit in fewer than 20 batches, the failed one leaves nothing behind.
 
 Tests run against a real Postgres:
