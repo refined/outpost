@@ -62,6 +62,9 @@ sample_cpu() {
   done > "$1"
 }
 
+# Two steps at a fixed rate. The first, without a profiler, gives CPU per container (docker stats) and SQL per capture
+# (pg_stat_statements). The second restarts the app with JFR, which slows it down, so it is used only for proportions:
+# where CPU goes and which calls wait on Postgres. JFR keeps the last 60 s and writes them when the app stops.
 profile_variant() {
   local base="$OUTDIR/$VARIANT-profile"
   psql_q "CREATE EXTENSION IF NOT EXISTS pg_stat_statements" >/dev/null
@@ -71,11 +74,16 @@ profile_variant() {
   wait
   psql_q "SELECT calls, round(total_exec_time), left(regexp_replace(query, '\s+', ' ', 'g'), 80)
           FROM pg_stat_statements WHERE query !~ 'pg_stat|pg_extension' ORDER BY total_exec_time DESC" > "$base.sql"
+
+  export JFR_OPTS="-XX:StartFlightRecording=settings=profile,jdk.ExecutionSample#period=2ms,disk=true,maxage=60s,dumponexit=true,filename=/tmp/app.jfr"
+  "${COMPOSE[@]}" up -d --wait --no-deps app >/dev/null 2>&1
+  SCRIPT=bench.js k6 -e SCENARIO=capture -e RATE=$PROFILE_RPS -e DURATION=15s -e OUT="$STAMP/$VARIANT-jfr-warmup" -e RUN=jwarm
+  SCRIPT=bench.js k6 -e SCENARIO=capture -e RATE=$PROFILE_RPS -e DURATION=${PROFILE_SECONDS}s -e OUT="$STAMP/$VARIANT-jfr" -e RUN=jfr
   "${COMPOSE[@]}" stop app >/dev/null 2>&1
   docker cp outpost-app-1:/tmp/app.jfr "$base.jfr" >/dev/null
+  unset JFR_OPTS
   "${COMPOSE[@]}" up -d --wait --no-deps app >/dev/null 2>&1
-  docker run --rm -v "$(cd "$OUTDIR" && (pwd -W 2>/dev/null || pwd))":/data -v "$(cd perf && (pwd -W 2>/dev/null || pwd))":/perf:ro \
-    gradle:9.8.1-jdk21 sh /perf/analyse-jfr.sh "/data/$VARIANT-profile.jfr" > "$base.txt" 2>&1 || true
+  docker run --rm -v "$(cd "$OUTDIR" && (pwd -W 2>/dev/null || pwd))":/data -v "$(cd perf && (pwd -W 2>/dev/null || pwd))":/perf:ro     gradle:9.8.1-jdk21 sh /perf/analyse-jfr.sh "/data/$VARIANT-profile.jfr" > "$base.txt" 2>&1 || true
   echo "  profile: $(cpu_avg "$base.cpu" 1) app / $(cpu_avg "$base.cpu" 2) postgres cores at $PROFILE_RPS rps"
 }
 

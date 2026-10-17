@@ -5,10 +5,8 @@
 services:
   app:
     environment:
-      # JFR keeps the last 60 s and writes them when the app stops: the runner stops it right after the profile step.
-      JAVA_OPTS: >-
-        -XX:MaxRAMPercentage=70 -XX:+UseG1GC
-        -XX:StartFlightRecording=settings=profile,jdk.ExecutionSample#period=2ms,disk=true,maxage=60s,dumponexit=true,filename=/tmp/app.jfr
+      # JFR_OPTS is set by perf/run-benchmarks.sh for the profile step only: JFR slows the app down noticeably.
+      JAVA_OPTS: -XX:MaxRAMPercentage=70 -XX:+UseG1GC ${JFR_OPTS:-}
     deploy:
       resources:
         limits:
