@@ -62,7 +62,7 @@ src/main/kotlin/io/github/refined/morledger/
   Application.kt                 main(), AppConfig (env), Application.module()
   money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
   ledger/Ledger.kt               model + Ledger: post (balance deltas now or collected), applyDeltas, balances, verify, entries
-  ledger/GroupCommitter.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, savepoint per request, one balance UPDATE per account
+  ledger/LedgerBatchCommit.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, savepoint per request, one balance UPDATE per account
   ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
   payments/                      PaymentService (tx, idempotency, locking), PaymentRepository (SQL), Model (+ DomainException types)
   reports/BalanceReport.kt       ledger balances -> report
@@ -196,7 +196,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 | 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
 | 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → short assumptions and trade-offs. Details go to `docs/design.md` |
-| 22 | Balance modes | `BALANCE_MODE=STORED` (default): one tx per request. `BATCHED`: group commit (`GroupCommitter`): a single writer runs queued requests in batches, one tx, savepoint per request, one summed balance UPDATE per account, answers after commit, per-item retry if the commit fails. Balances exact in both; a test proves identical reports |
+| 22 | Balance modes | `BALANCE_MODE=STORED` (default): one tx per request. `BATCHED`: group commit (`LedgerBatchCommit`): a single writer runs queued requests in batches, one tx, savepoint per request, one summed balance UPDATE per account, answers after commit, per-item retry if the commit fails. Balances exact in both; a test proves identical reports |
 | 23 | Removed variants (2026-10-16) | COMPUTED (slow reads), snapshot + tail (reads pay the tail), snapshot-only (stale, writes no cheaper), hot-account sharding (test uninformative: merchant row not sharded, CPU-bound) and the TigerBeetle engine (starved by 2.3 GB static memory + dual write). Findings in docs/performance.md and docs/ledger-comparison.md; code at commit `0ffcf3f` |
 | 24 | Analytics | Computed from the business tables; `reconciled` = records-based merchant balance == ledger balance |
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |

@@ -3,7 +3,7 @@ package io.github.refined.morledger
 import io.github.refined.morledger.api.installErrorHandling
 import io.github.refined.morledger.api.routes
 import io.github.refined.morledger.db.Database
-import io.github.refined.morledger.ledger.GroupCommitter
+import io.github.refined.morledger.ledger.LedgerBatchCommit
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.money.RefundFeePolicy
 import io.github.refined.morledger.payments.PaymentService
@@ -80,11 +80,11 @@ fun Application.module(
     settings: LedgerSettings = LedgerSettings(),
 ) {
     val ledger = Ledger()
-    val committer = if (settings.balanceMode == BalanceMode.BATCHED) {
-        GroupCommitter(dataSource, ledger, settings.batchMaxSize, settings.batchMaxWaitMs).also { committer ->
+    val batchCommit = if (settings.balanceMode == BalanceMode.BATCHED) {
+        LedgerBatchCommit(dataSource, ledger, settings.batchMaxSize, settings.batchMaxWaitMs).also { batchCommit ->
             monitor.subscribe(ApplicationStopped) {
-                log.info("Group commit: {} items in {} batches", committer.items, committer.batches)
-                committer.close()
+                log.info("Batch commit: {} items in {} batches", batchCommit.items, batchCommit.batches)
+                batchCommit.close()
             }
         }
     } else {
@@ -97,7 +97,7 @@ fun Application.module(
     installErrorHandling()
     routes(
         dataSource,
-        PaymentService(dataSource, pricing, clock, ledger, committer),
+        PaymentService(dataSource, pricing, clock, ledger, batchCommit),
         BalanceReport(dataSource, ledger),
         ledger,
         settings.description,

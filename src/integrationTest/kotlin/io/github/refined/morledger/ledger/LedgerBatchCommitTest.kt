@@ -12,7 +12,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /** Below the API: which requests share a batch cannot be controlled over HTTP. */
-class GroupCommitterTest {
+class LedgerBatchCommitTest {
     private val dataSource = TestDatabase.dataSource
     private val ledger = Ledger()
     private val clearing = Account("psp_clearing", "EUR", NormalSide.DEBIT)
@@ -24,12 +24,12 @@ class GroupCommitterTest {
     @Test
     fun `a batch commits together, applies summed balances once and rolls back a failing item alone`() {
         TestDatabase.reset()
-        GroupCommitter(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { committer ->
+        LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { batchCommit ->
             val pool = Executors.newFixedThreadPool(20)
             val results = (1..20).map { i ->
                 pool.submit<Long> {
                     runBlocking {
-                        committer.submit { conn, deltas ->
+                        batchCommit.submit { conn, deltas ->
                             ledger.post(conn, entry("p_$i", 100), deltas)
                             if (i == 7) error("item 7 fails after writing its entry")
                             i.toLong()
@@ -42,7 +42,7 @@ class GroupCommitterTest {
 
             assertFailsWith<Exception> { results[6].get() }
             assertEquals((1..20L).filter { it != 7L }, results.filterIndexed { i, _ -> i != 6 }.map { it.get() })
-            assertTrue(committer.batches < 20, "${committer.items} items in ${committer.batches} batches")
+            assertTrue(batchCommit.batches < 20, "${batchCommit.items} items in ${batchCommit.batches} batches")
         }
 
         val balances = dataSource.transaction { ledger.balances(it) }.associate { it.account.code to it.signedSum }

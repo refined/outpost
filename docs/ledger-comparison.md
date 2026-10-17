@@ -57,7 +57,7 @@ We built `TigerBeetleLedger` as a second implementation of the ledger interface,
 | Postgres, stored, 8 sub-accounts | 1 | 350 / 350 / 300 rps | 3 ms | none |
 | TigerBeetle (+ Postgres for business rows) | 1 (twice) | 200 / 200 / 200 rps in one run; stalled in the other | 8–22 ms | none |
 
-Once requests really run concurrently (round 3), `STORED` saturates on the hot accounts' row locks: up to 84% of active Postgres backends wait on a lock with every payment on one merchant. Group commit takes each balance row once per batch, keeps lock waits at 0% and holds 1.5–2.6× more. TigerBeetle's ~2.3 GB of static memory starved the app and Postgres under this budget, and the dual write added a network round trip to every request.
+Once requests really run concurrently (round 3), `STORED` saturates on the hot accounts' row locks: up to 84% of active Postgres backends wait on a lock in the one-merchant benchmark scenario. Group commit takes each balance row once per batch, keeps lock waits at 0% and holds 1.5–2.6× more. TigerBeetle's ~2.3 GB of static memory starved the app and Postgres under this budget, and the dual write added a network round trip to every request.
 
 ## Decision
 

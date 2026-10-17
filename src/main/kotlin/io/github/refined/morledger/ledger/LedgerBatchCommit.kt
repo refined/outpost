@@ -9,11 +9,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.sql.DataSource
 
-/**
- * Group commit: one writer thread runs queued operations in batches, each batch in one transaction, and applies
- * the batch's balance changes with one UPDATE per account. Callers suspend, holding no thread, until their batch has committed.
- */
-class GroupCommitter(
+class LedgerBatchCommit(
     private val dataSource: DataSource,
     private val ledger: Ledger,
     private val maxSize: Int,
@@ -31,7 +27,7 @@ class GroupCommitter(
     private val queue = LinkedBlockingQueue<Work<*>>()
     private val batchCount = AtomicLong()
     private val itemCount = AtomicLong()
-    private val writer = Thread(::loop, "group-committer").apply {
+    private val writer = Thread(::loop, "ledger-batch-commit").apply {
         isDaemon = true
         start()
     }

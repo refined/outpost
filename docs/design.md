@@ -50,9 +50,9 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 | `STORED` (default) | One transaction: business row, journal entry, `UPDATE accounts SET balance = balance + x` on each account | One per request | One per account per request; the row lock is held until commit |
 | `BATCHED` | Queued; one writer thread runs a batch of up to `BATCH_MAX_SIZE` requests in one transaction | One per batch | One per account per batch, with the summed delta |
 
-**Group commit** ([`ledger/GroupCommitter.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/GroupCommitter.kt)):
+**Group commit**, `LedgerBatchCommit` ([`ledger/LedgerBatchCommit.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/LedgerBatchCommit.kt)):
 - **Validation runs outside.** Parsing, validation, the fingerprint and the split run on the request thread, in parallel. Only the database work is queued.
-- **The batch fills by itself under load.** The writer takes the first queued request plus whatever else is waiting, up to `BATCH_MAX_SIZE`, or keeps waiting up to `BATCH_MAX_WAIT_MS` (default 0: no artificial delay). At low load a batch holds one request, so latency is unchanged; near saturation batches grow and commits get rarer.
+- **The batch fills by itself under load.** The writer takes the first queued request plus whatever else is waiting, up to `BATCH_MAX_SIZE`, or keeps waiting up to `BATCH_MAX_WAIT_MS` (default 0: no artificial delay). At low load a batch holds one request, so latency is unchanged; near saturation batches grow and commits get rarer. A batch is whatever is in the queue, in arrival order: requests for any merchants and accounts mixed.
 - **One request fails alone.** Each request runs under its own `SAVEPOINT`. A refused refund or an idempotency conflict rolls back to it and answers with its error; the rest of the batch commits. Its balance changes are merged into the batch only on success.
 - **Each request is answered after its batch has committed**, so a 201 means the money is durably booked, as in `STORED`.
 - **If the commit itself fails,** each request in the batch is retried in its own transaction, so one bad request cannot fail its neighbours.
@@ -124,7 +124,7 @@ Where the brief is open, these are the decisions and why.
 - **Kept as an option: group commit (`BATCHED`).** Still synchronous and exact, but a batch of requests shares one commit and one balance update per account.
 - **Rejected: updating balances from a queue** (outbox → broker → consumer). The balance lags, so it cannot back decisions such as "can we refund / pay out X?". It also needs an outbox, idempotent consumers and per-account ordering. A queue is the right tool for what happens *around* the ledger (merchant webhooks, notifications, analytics), not for the balance itself.
 
-The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is `STORED`'s limit once requests run concurrently: with every payment on one merchant, 84% of active Postgres backends wait on a lock at ~350 rps. Group commit (`BATCHED`) takes each balance row once per batch and held 600–800 rps. The remedies, in the order to reach for them:
+The cost of the chosen approach is the **hot account**. `psp_clearing` and `fee_revenue` are touched by every payment, so their row lock serialises those updates (see Concurrency below). Measured on 2 CPUs, that lock is `STORED`'s limit once requests run concurrently: in the one-merchant scenario, 84% of active Postgres backends wait on a lock at ~350 rps. Group commit (`BATCHED`) takes each balance row once per batch and held 600–800 rps. The remedies, in the order to reach for them:
 - `BALANCE_MODE=BATCHED` (in the code): group commit, one commit and one balance update per account per batch;
 - splitting a hot account into N sub-accounts (measured before the request-thread fix, then removed; worth revisiting);
 - moving the engine to TigerBeetle, which avoids locks by applying transfers sequentially in a single thread.
@@ -192,7 +192,7 @@ The integration suite covers:
 - **Concurrency**: parallel HTTP requests (the test asserts they really overlapped): 16 captures on shared accounts (no lost updates, no deadlocks), 20 racing partial refunds, duplicate captures, replayed refunds.
 - **Balance modes**: the same flow through the API in `STORED` and `BATCHED` gives identical reports; in a batch, a conflicting capture and an over-refund fail alone while their neighbours commit; concurrent batched captures lose nothing.
 - **Database invariants**: data goes in through the API, then raw SQL tries to go around it: unbalanced postings are rejected at commit, history is append-only, and a drifted stored balance shows up in `/v1/ledger/verify`.
-- **Ledger level** (`ledger/`, the only test below the API): the group committer with a batch composed on purpose: 20 requests, one failing after it wrote its entry; the other 19 commit in fewer than 20 batches, the failed one leaves nothing behind.
+- **Ledger level** (`ledger/`, the only test below the API): `LedgerBatchCommit` with a batch composed on purpose: 20 requests, one failing after it wrote its entry; the other 19 commit in fewer than 20 batches, the failed one leaves nothing behind.
 
 Tests run against a real Postgres:
 - in the compose `test` service, a throwaway `postgres-test` (tmpfs);

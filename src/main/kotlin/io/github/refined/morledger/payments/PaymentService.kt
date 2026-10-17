@@ -3,7 +3,7 @@ package io.github.refined.morledger.payments
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
-import io.github.refined.morledger.ledger.GroupCommitter
+import io.github.refined.morledger.ledger.LedgerBatchCommit
 import io.github.refined.morledger.ledger.Ledger
 import io.github.refined.morledger.ledger.NewJournalEntry
 import io.github.refined.morledger.money.Allocation
@@ -21,7 +21,7 @@ class PaymentService(
     private val pricing: PricingSettings = PricingSettings(),
     private val clock: Clock = Clock.systemUTC(),
     private val ledger: Ledger = Ledger(),
-    private val committer: GroupCommitter? = null,
+    private val batchCommit: LedgerBatchCommit? = null,
 ) {
     suspend fun capture(cmd: CaptureCommand): Recorded<PaymentDetails> {
         validateId("paymentId", cmd.paymentId)
@@ -143,7 +143,7 @@ class PaymentService(
 
     // STORED blocks on JDBC, so it runs on the IO pool; BATCHED only waits for the writer thread, suspended.
     private suspend fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
-        if (committer != null) committer.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
+        if (batchCommit != null) batchCommit.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
 
     private fun replayRefund(conn: Connection, existing: Stored<Refund>, fingerprint: String): Recorded<RefundResult> {
         if (existing.fingerprint != fingerprint) {

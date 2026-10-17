@@ -65,7 +65,7 @@ Lock / IO waits at the saturating step, `STORED`: 68% / 15% on capture at 500 rp
 
 **What it shows:**
 - **With real concurrency, the hot-account lock *is* `STORED`'s bottleneck.** Once 10 transactions run at once, they queue on the row locks of `psp_clearing`, `fee_revenue`, `tax_payable` and, with one merchant, `merchant_payable`. Near saturation 70–84% of active backends wait on a lock, and the one-merchant scenario saturates first, at ~300 rps. Rounds 1 and 2 never got there, because 3 request threads could not create the contention.
-- **Group commit removes that contention.** One writer takes each balance row once per batch, so lock waits stay at 0%. It reached 600–800 rps, 1.5–2.6× `STORED` and the best single-merchant result of all variants.
+- **Group commit removes that contention.** One writer takes each balance row once per batch, so lock waits stay at 0%. It reached 600–800 rps, 1.5–2.6× `STORED` and the best result of all variants in the one-merchant scenario.
 - **Bulk ingest rose too:** stored 271 → 415, batched 314 → 470 payments/s.
 - **This is what makes sharding meaningful again.** With measured lock waits on `STORED`, splitting hot accounts (merchant rows included) is now a real alternative to group commit. Group commit already removes the waits without changing the chart of accounts.
 
