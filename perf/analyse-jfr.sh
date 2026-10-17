@@ -1,7 +1,8 @@
 #!/bin/sh
 # Summarises a JFR recording; runs inside a JDK image (the `jfr` tool), see perf/run-benchmarks.sh.
 #   CPU:  Java execution samples, by the first frame (from the top) in a known library or in our code.
-#   JDBC: samples of threads blocked inside the Postgres driver, by the call in our code that issued it.
+#   JDBC: samples of threads blocked inside the Postgres driver, by the call in our code that issued it
+#         (skipping the shared helpers in db/, so the table method shows, not db.SqlKt.query).
 set -eu
 f=$1
 
@@ -33,7 +34,7 @@ stacks jdk.NativeMethodSample | awk -F'|' '
   /org\.postgresql\./ {
     c = "other"
     if ($0 ~ /PgConnection\.commit/) c = "commit"
-    else for (i = 2; i <= NF; i++) if ($i ~ /^io\.github\.refined\./) { c = $i; sub(/\(.*/, "", c); sub(/^io\.github\.refined\.morledger\./, "", c); break }
+    else for (i = 2; i <= NF; i++) if ($i ~ /^io\.github\.refined\./ && $i !~ /^io\.github\.refined\.morledger\.db\./) { c = $i; sub(/\(.*/, "", c); sub(/^io\.github\.refined\.morledger\./, "", c); break }
     n[c]++; total++
   }
   END { for (c in n) printf "  %5.1f%%  %s\n", 100 * n[c] / total, c; printf "  (%d samples)\n", total }' | sort -rn
