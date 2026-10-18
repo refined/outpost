@@ -563,12 +563,101 @@ async function simulatePage() {
   renderLog();
 }
 
+const perfView = { scenario: store.get("perfScenario", "mixed") };
+const SCENARIOS = { capture: "Capture, 100 merchants", hot: "One merchant", mixed: "Mixed 85/10/5" };
+
+function perfChart(canvas, stages, scenario) {
+  const value = (v) => (v && v[scenario] ? v[scenario] : null);
+  charts.push(new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: stages.map((s) => s.short),
+      datasets: [
+        { label: "STORED", data: stages.map((s) => value(s.stored)), backgroundColor: token("--series-1"), borderRadius: 4, borderSkipped: "start" },
+        { label: "BATCHED", data: stages.map((s) => value(s.batched)), backgroundColor: token("--series-2"), borderRadius: 4, borderSkipped: "start" },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "top", align: "start", labels: { boxWidth: 12, boxHeight: 12 } },
+        tooltip: {
+          callbacks: {
+            title: (items) => stages[items[0].dataIndex].name,
+            label: (ctx) => {
+              const v = stages[ctx.dataIndex][ctx.datasetIndex === 0 ? "stored" : "batched"];
+              if (!v) return `${ctx.dataset.label}: not available yet`;
+              return `${ctx.dataset.label}: ${int(ctx.parsed.y)} rps${v.carried ? " (code unchanged, previous stage)" : ""}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { display: false } },
+        y: { beginAtZero: true, grid: { color: token("--grid") }, border: { display: false }, title: { display: true, text: "highest holding rate, requests/s" } },
+      },
+      datasets: { bar: { categoryPercentage: 0.75, barPercentage: 0.9 } },
+    },
+  }));
+}
+
+async function performancePage() {
+  const data = await fetch("/ui/performance.json", { cache: "no-cache" }).then((r) => r.json());
+  const final = data.stages[data.stages.length - 1];
+  const sc = perfView.scenario;
+  const rps = (v) => (v && v[sc] ? int(v[sc]) : "—");
+
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Performance</h1><p class="sub">${esc(data.summary)}</p></div></div>
+    <div class="kpis">
+      ${kpi("STORED holds", `${int(final.stored.mixed)} rps`, "mixed load, the default mode")}
+      ${kpi("BATCHED holds", `${int(final.batched.mixed)} rps`, "mixed load, group commit of 100")}
+      ${kpi("p95 at 300 captures/s", `${final.stored.p95At300} / ${final.batched.p95At300} ms`, "STORED / BATCHED")}
+      ${kpi("Budget", esc(data.budget), esc(data.conditions))}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head"><h2>How each step moved the ceiling</h2><span class="hint">highest arrival rate held with p95 &lt; 250 ms and &lt; 1% errors</span><span class="spacer"></span>
+        <div class="seg" id="p-sc">${Object.entries(SCENARIOS).map(([k, l]) => `<button type="button" data-s="${k}" class="${k === sc ? "on" : ""}">${l}</button>`).join("")}</div></div>
+      <div style="height:320px"><canvas id="p-chart" role="img" aria-label="Highest holding rate per stage for STORED and BATCHED"></canvas></div>
+      <details class="data-table"><summary>Show as a table</summary><div class="scroll"><table>
+        <thead><tr><th>Stage</th><th class="num">STORED, rps</th><th class="num">BATCHED, rps</th></tr></thead>
+        <tbody>${data.stages.map((s) => `<tr><td>${esc(s.name)}</td><td class="num">${rps(s.stored)}</td><td class="num">${rps(s.batched)}</td></tr>`).join("")}</tbody></table></div></details>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head"><h2>How we got here</h2><span class="hint">each stage measured from its own commit, same harness, same machine</span></div>
+      <div class="table-scroll"><table><thead><tr><th>Stage</th><th>What changed</th><th class="num">STORED</th><th class="num">BATCHED</th><th class="num">CPU app / DB @300</th></tr></thead>
+      <tbody>${data.stages.map((s) => {
+        const v = s.batched || s.stored;
+        return `<tr><td>${esc(s.name)}</td><td class="wrap">${esc(s.change)}</td><td class="num">${rps(s.stored)}</td><td class="num">${rps(s.batched)}</td>
+          <td class="num">${v.appCores.toFixed(2)} / ${v.postgresCores.toFixed(2)}</td></tr>`;
+      }).join("")}</tbody></table></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-head"><h2>Where we started: six ways to keep a balance</h2><span class="hint">${esc(data.start.note)}</span></div>
+      <div class="table-scroll"><table><thead><tr><th>Method</th><th>On a write</th><th>On a read</th><th class="num">Capture / one merchant / mixed, rps</th><th class="num">Report @100k, p95</th></tr></thead>
+      <tbody>${data.start.methods.map((m) => `<tr><td>${esc(m.name)}</td><td class="wrap">${esc(m.write)}</td><td class="wrap">${esc(m.read)}</td>
+        <td class="num">${[m.capture, m.hot, m.mixed].map((x) => (x ? int(x) : "—")).join(" / ")}</td><td class="num">${m.report100k != null ? `${int(m.report100k)} ms` : "—"}</td></tr>`).join("")}</tbody></table></div>
+    </div>
+    <p class="hint" style="margin-top:16px">Method, setup and the full deep dive: <a href="${esc(data.docs)}" target="_blank" rel="noopener">docs/performance.md</a>.</p>`;
+
+  perfChart(document.getElementById("p-chart"), data.stages, sc);
+  document.getElementById("p-sc").addEventListener("click", (ev) => {
+    const s = ev.target.dataset.s;
+    if (!s) return;
+    perfView.scenario = s;
+    store.set("perfScenario", s);
+    render();
+  });
+}
+
 const ROUTES = [
   [/^#?\/?$/, "overview", overviewPage],
   [/^#\/merchants\/?$/, "merchants", merchantsPage],
   [/^#\/merchants\/(.+)$/, "merchants", merchantPage],
   [/^#\/ledger\/?$/, "ledger", ledgerPage],
   [/^#\/simulate\/?$/, "simulate", simulatePage],
+  [/^#\/performance\/?$/, "performance", performancePage],
 ];
 
 let rendering = 0;

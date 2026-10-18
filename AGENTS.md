@@ -57,7 +57,7 @@ Dockerfile, .dockerignore        image build (gradle:9.8.1-jdk21 -> JRE 21)
 perf/k6/                         lib.js (deterministic data), seed.js (demo dataset), bench.js (one benchmark step)
 perf/compose.limits.yml          resource limits override (2 CPUs / 3 GB for app + db)
 perf/run-benchmarks.sh           runs all engine variants, writes perf/results/<time>/summary.md (results are gitignored)
-docs/ledger-comparison.md        platforms compared + the decision; docs/performance.md: benchmark method, results of 6 variants
+docs/ledger-comparison.md        platforms compared + the decision; docs/performance.md: results per stage, deep dive, method
 src/main/kotlin/io/github/refined/morledger/
   Application.kt                 main(), AppConfig (env), Application.module()
   money/Allocation.kt            pure money math: capture split, refund apportionment, RefundFeePolicy
@@ -75,7 +75,7 @@ src/main/kotlin/io/github/refined/morledger/
   db/Sql.kt                      safe sql { "... ${param(value)}" }, JDBC query/update/batch, UTC binding
 src/main/resources/
   db/migration/                  V1__schema.sql: the only migration (edit in place while there are no users; wipe the pgdata volume after changes)
-  web/                           ui/ (demo console, vanilla JS), docs/ (Swagger page), openapi.yaml
+  web/                           ui/ (demo console, vanilla JS; performance.json feeds #/performance), docs/ (Swagger page), openapi.yaml
 src/test/kotlin/...              unit tests: pure functions only (no DB, no app)
 src/integrationTest/kotlin/...   tests through the HTTP API (api/ApiSupport.kt helpers); TestDatabase = one shared Postgres per JVM
 ```
@@ -89,7 +89,7 @@ docker compose up -d --build --wait              # Postgres (127.0.0.1:5442) + a
 docker compose --profile test run --rm test      # test suite in the build stage, against postgres-test (tmpfs)
 docker compose logs -f app
 docker compose --profile tools run --rm k6 run seed.js                     # demo data (~100k payments, ~3 min)
-perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-batched-10 pg-batched-100
+perf/run-benchmarks.sh [variant...]                                         # pg-stored pg-batched-100 pg-batched-1000, or "name:SETTING=value"
 docker compose --profile test down               # stop everything; -v also drops pgdata
 ```
 
@@ -208,11 +208,12 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 24 | Analytics | Computed from the business tables; `reconciled` = records-based merchant balance == ledger balance |
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |
 | 26 | Demo data | `perf/k6/seed.js`: deterministic (SEED), idempotent (PREFIX); ~100 Zipf-sized merchants, 3 currencies, 9 jurisdictions, ~7% refunds, 4 refund-heavy anomalies |
-| 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Constant-arrival-rate ladders; a step holds if it keeps up with p95 < 250 ms and < 1% errors; pg_stat_activity is sampled every 200 ms per step (share of active backends waiting on Lock / IO) |
+| 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Ladders start at 400, climb by 200 while a step holds (served ≥ 95%, p95 < 250 ms, < 1% errors), then try 100 below the first failure; failing steps abort early. Profile at 300/s: docker stats + pg_stat_statements without a profiler, JFR in a separate step. Variants are presets or `name:SETTING=value`; `results.json` per run. The published numbers come from one campaign (2026-10-17/18): every stage from its own commit via a worktree, mains power, quiet host |
 | 28 | Blocking JDBC in Ktor | Route handlers run database work in `blocking { }` = `withContext(Dispatchers.IO)` (`api/Routes.kt`). With a 1-CPU container Ktor has only 3 request threads; blocking JDBC on them capped concurrency at 3 (found with JFR, 2026-10-17). Next steps if needed: virtual threads, then an async driver |
 | 29 | Batch commit wait | `LedgerBatchCommit.submit` is `suspend` and awaits its batch (`CompletableFuture.await`); a waiting request holds no thread. `PaymentService.capture/refund` are `suspend`; `STORED` runs on `Dispatchers.IO` inside the service |
 | 30 | JDBC batching | Hikari property `reWriteBatchedInserts=true`: a capture's postings go as one multi-row INSERT. Measured neutral on throughput, kept for fewer round trips. Grouping a whole batch's SQL by hand was estimated and skipped |
 | 31 | SQL layer (2026-10-17) | Stateless `internal object *Table` components own SQL and row mapping; a Table may span related physical tables. `LedgerWriter` owns validation, account caching and posting coordination; `LedgerBatchCommit` owns queue/savepoints/commit/retry. `AnalyticsTable` owns queries; `Analytics` assembles reports. Safe `sql { "... ${param(value)}" }` keeps values as JDBC parameters; dynamic filters register values in the same builder. No ORM or new dependency. |
+| 32 | Performance page | Console page `#/performance` reads the static `web/ui/performance.json` (curated from the campaign's `results.json`): KPI tiles, the per-stage chart (STORED vs BATCHED, scenario switch) with a table view, the six starting methods. `docs/performance.md` is the long form: results first, the story, deep dive, setup, method |
 
 ## Ideas not done (candidates if time allows)
 
