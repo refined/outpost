@@ -1,5 +1,6 @@
 package io.github.refined.morledger.ledger
 
+import io.github.refined.morledger.db.MAX_ROWS_PER_STATEMENT
 import io.github.refined.morledger.db.batch
 import io.github.refined.morledger.db.instant
 import io.github.refined.morledger.db.query
@@ -11,22 +12,31 @@ import java.sql.ResultSet
 import java.time.Instant
 
 internal object LedgerTable {
-    fun insertEntry(conn: Connection, entry: NewJournalEntry): Long = conn.query(sql {
-        """
-        INSERT INTO ledger.journal_entries (kind, payment_id, refund_id, effective_at)
-        VALUES (${param(entry.kind.name)}, ${param(entry.paymentId)}, ${param(entry.refundId)}, ${param(entry.effectiveAt)})
-        RETURNING id
-        """
-    }) { it.getLong("id") }.single()
+    /** Entry ids in the order of [entries]; each entry must have its own (kind, paymentId, refundId). */
+    fun insertEntries(conn: Connection, entries: List<NewJournalEntry>): List<Long> {
+        val keys = entries.map { Triple(it.kind.name, it.paymentId, it.refundId) }
+        require(keys.distinct().size == keys.size) { "entries in one insert must have distinct keys" }
+        // RETURNING has no guaranteed row order, so ids are matched back by key.
+        val ids = entries.chunked(MAX_ROWS_PER_STATEMENT).flatMap { chunk ->
+            conn.query(sql {
+                """
+                INSERT INTO ledger.journal_entries (kind, payment_id, refund_id, effective_at)
+                VALUES ${chunk.joinToString(", ") { "(${param(it.kind.name)}, ${param(it.paymentId)}, ${param(it.refundId)}, ${param(it.effectiveAt)})" }}
+                RETURNING id, kind, payment_id, refund_id
+                """
+            }) { Triple(it.getString("kind"), it.getString("payment_id"), it.getString("refund_id")) to it.getLong("id") }
+        }.toMap()
+        return keys.map { ids.getValue(it) }
+    }
 
-    fun insertPostings(conn: Connection, entryId: Long, postings: List<Pair<Long, Long>>) {
-        conn.batch(postings) { (accountId, amount) ->
-            sql {
+    fun insertPostings(conn: Connection, postings: List<NewPosting>) {
+        postings.chunked(MAX_ROWS_PER_STATEMENT).forEach { chunk ->
+            conn.update(sql {
                 """
                 INSERT INTO ledger.postings (entry_id, account_id, amount)
-                VALUES (${param(entryId)}, ${param(accountId)}, ${param(amount)})
+                VALUES ${chunk.joinToString(", ") { "(${param(it.entryId)}, ${param(it.accountId)}, ${param(it.amount)})" }}
                 """
-            }
+            })
         }
     }
 
@@ -152,3 +162,5 @@ internal object LedgerTable {
 }
 
 internal data class StoredAccount(val id: Long, val normalSide: NormalSide)
+
+internal data class NewPosting(val entryId: Long, val accountId: Long, val amount: Long)

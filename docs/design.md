@@ -40,7 +40,7 @@ This is the model the established ledgers use: TigerBeetle keeps debit/credit co
 
 **Atomicity.** A capture or refund is one database transaction: the business record (`payments`/`refunds`) and its journal entry commit together.
 
-**Code layout.** `LedgerWriter` validates postings, caches existing account ids and coordinates ordered writes; `LedgerTable` contains SQL and row mapping. `LedgerBatchCommit` manages the queue, savepoints, commit and retry. These components know nothing about payment rules. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
+**Code layout.** `LedgerWriter` validates postings, caches existing account ids and coordinates ordered writes; `LedgerTable` contains SQL and row mapping. `LedgerBatchCommit` manages the queue, set-based groups, savepoints, commit and retry. These components know nothing about payment rules. The domain mapping lives in [`ChartOfAccounts.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt), the money math in [`money/Allocation.kt`](../src/main/kotlin/io/github/refined/morledger/money/Allocation.kt).
 
 ## SQL access
 
@@ -63,7 +63,7 @@ val query = sql {
 val ids = conn.query(query) { it.getString("payment_id") }
 ```
 
-`param` returns `?` and records the value in order; it never escapes or inserts the value into SQL. Write queries as multiline SQL with each clause on its own line, including subqueries. Optional conditions live inline at `WHERE ${where { ... }}`: the small `where` helper joins them with `AND`, or returns `TRUE` for an empty list. Conditions register parameters in their SQL order. Ordinary interpolation is reserved for static SQL fragments and enum-controlled identifiers or sort directions. Do not concatenate completed `Sql` objects: their parameter lists must stay attached to their text. JDBC helpers close statements and result sets, bind nullable values and convert `Instant` to UTC. Batch inserts and balance updates reuse one prepared statement with `executeBatch`; balance updates keep account-id order. Transactions remain explicit at the service or batch boundary.
+`param` returns `?` and records the value in order; it never escapes or inserts the value into SQL. Write queries as multiline SQL with each clause on its own line, including subqueries. Optional conditions live inline at `WHERE ${where { ... }}`: the small `where` helper joins them with `AND`, or returns `TRUE` for an empty list. Conditions register parameters in their SQL order. Ordinary interpolation is reserved for static SQL fragments and enum-controlled identifiers or sort directions. Do not concatenate completed `Sql` objects: their parameter lists must stay attached to their text. JDBC helpers close statements and result sets, bind nullable values and convert `Instant` to UTC. Multi-row inserts list their rows in one `VALUES` clause, at most 1000 rows per statement. Balance updates reuse one prepared statement with `executeBatch` and keep account-id order. Transactions remain explicit at the service or batch boundary.
 
 ## Balance modes
 
@@ -77,10 +77,11 @@ val ids = conn.query(query) { it.getString("payment_id") }
 **Group commit**, `LedgerBatchCommit` ([`ledger/LedgerBatchCommit.kt`](../src/main/kotlin/io/github/refined/morledger/ledger/LedgerBatchCommit.kt)):
 - **Validation runs outside.** Parsing, validation, the fingerprint and the split run on the request thread, in parallel. Only the database work is queued.
 - **The batch fills by itself under load.** The writer takes the first queued request plus whatever else is waiting, up to `BATCH_MAX_SIZE`, or keeps waiting up to `BATCH_MAX_WAIT_MS` (default 0: no artificial delay). At low load a batch holds one request, so latency is unchanged; near saturation batches grow and commits get rarer. A batch is whatever is in the queue, in arrival order: requests for any merchants and accounts mixed.
-- **One request fails alone.** Each request runs under its own `SAVEPOINT`. A refused refund or an idempotency conflict rolls back to it and answers with its error; the rest of the batch commits. Its balance changes are merged into the batch only on success.
+- **Captures are written as a set.** A batch's captures go in one multi-row `INSERT` per table: payments (`ON CONFLICT DO NOTHING RETURNING payment_id, recorded_at`), journal entries, postings. The response is built from memory. Only a replayed `paymentId` is read back; a different payload answers 409 without writing. A batch costs a fixed number of round trips instead of ~7 per capture: one writer running each capture's statements in turn capped `BATCHED` at ~1000 captures/s.
+- **A refund fails alone.** Each refund locks and reads its payment, so it runs under its own `SAVEPOINT` after the captures. A refused refund rolls back to it and answers with its error; the rest of the batch commits. Its balance changes are merged into the batch only on success. Requests in one batch were in flight together, so captures first is a valid order.
 - **Each request is answered after its batch has committed**, so a 201 means the money is durably booked, as in `STORED`.
 - **If the commit itself fails,** each request in the batch is retried in its own transaction, so one bad request cannot fail its neighbours.
-- **What it costs:** one writer means one connection's worth of database work at a time. Idempotency and refund locking are unchanged: a duplicate `paymentId` in the same batch hits the same `ON CONFLICT` and fingerprint check.
+- **What it costs:** one writer means one connection's worth of database work at a time. Idempotency and refund locking are unchanged: a `paymentId` repeated in the same batch is inserted once, and the repeats go through the fingerprint check as replays.
 
 Four more variants were measured and removed (the numbers are in [performance.md](performance.md)):
 - balances summed on read;
@@ -262,7 +263,7 @@ src/main/kotlin/io/github/refined/morledger/
   ledger/Model.kt              ledger models and pure posting validation
   ledger/LedgerWriter.kt       account cache and posting coordination
   ledger/LedgerTable.kt        ledger SQL and row mapping
-  ledger/LedgerBatchCommit.kt  queue, savepoints, group commit, retry
+  ledger/LedgerBatchCommit.kt  queue, set-based groups, savepoints, group commit, retry
   ledger/ChartOfAccounts.kt    accounts and the postings for capture/refund
   payments/                    PaymentService (transactions, idempotency, locking), PaymentsTable, RefundsTable, model
   reports/BalanceReport.kt     ledger balances -> report

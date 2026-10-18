@@ -84,6 +84,16 @@ class LedgerModesApiTest {
         }
 
     @Test
+    fun `one payment captured several times in a batch is stored once`() =
+        api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED, batchMaxWaitMs = 50)) {
+            val statuses = coroutineScope { (1..6).map { async(Dispatchers.IO) { client.capture("p_1").status } }.awaitAll() }
+
+            assertEquals(mapOf(HttpStatusCode.Created to 1, HttpStatusCode.OK to 5), statuses.groupingBy { it }.eachCount())
+            assertEquals(9_395L, client.merchantBalance("m_1"))
+            client.assertBooksBalance()
+        }
+
+    @Test
     fun `batched captures running concurrently lose nothing`() =
         api(ledger = LedgerSettings(balanceMode = BalanceMode.BATCHED)) {
             coroutineScope {

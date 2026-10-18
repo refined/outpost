@@ -16,8 +16,6 @@ object Database {
                 maximumPoolSize = 10
                 isAutoCommit = false
                 transactionIsolation = "TRANSACTION_READ_COMMITTED"
-                // pgjdbc sends an executeBatch of INSERTs as one multi-row INSERT instead of one statement per row.
-                addDataSourceProperty("reWriteBatchedInserts", "true")
             },
         )
 

@@ -7,17 +7,21 @@ class LedgerWriter {
     // Cache only existing rows: an account inserted by this transaction may still roll back.
     private val accountIds = ConcurrentHashMap<Account, Long>()
 
-    fun post(conn: Connection, entry: NewJournalEntry, deltas: MutableMap<Long, Long>? = null): Long {
-        val lines = validatedPostings(entry)
+    fun post(conn: Connection, entry: NewJournalEntry, deltas: MutableMap<Long, Long>? = null) = postAll(conn, listOf(entry), deltas)
+
+    fun postAll(conn: Connection, entries: List<NewJournalEntry>, deltas: MutableMap<Long, Long>? = null) {
+        if (entries.isEmpty()) return
+        val lines = entries.map { validatedPostings(it) }
         // Fixed account order prevents deadlocks between concurrent writers.
-        val ids = lines.map { it.account }.distinct().sortedBy { it.code + "|" + it.currency }
+        val ids = lines.flatten().map { it.account }.distinct().sortedBy { it.code + "|" + it.currency }
             .associateWith { accountId(conn, it) }
-        val entryId = LedgerTable.insertEntry(conn, entry)
-        LedgerTable.insertPostings(conn, entryId, lines.map { ids.getValue(it.account) to it.amount })
-        val entryDeltas = deltas ?: mutableMapOf()
-        for (line in lines) entryDeltas.merge(ids.getValue(line.account), line.amount, Long::plus)
-        if (deltas == null) LedgerTable.applyDeltas(conn, entryDeltas)
-        return entryId
+        val entryIds = LedgerTable.insertEntries(conn, entries)
+        LedgerTable.insertPostings(conn, entryIds.zip(lines).flatMap { (entryId, entryLines) ->
+            entryLines.map { NewPosting(entryId, ids.getValue(it.account), it.amount) }
+        })
+        val all = deltas ?: mutableMapOf()
+        for (line in lines.flatten()) all.merge(ids.getValue(line.account), line.amount, Long::plus)
+        if (deltas == null) LedgerTable.applyDeltas(conn, all)
     }
 
     // A batch may cache accounts created by an earlier item; a failed commit invalidates those ids.

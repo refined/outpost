@@ -146,7 +146,7 @@ BATCH_MAX_SIZE=100
 BATCH_MAX_WAIT_MS=0
 ```
 
-`BATCHED` groups up to 100 queued operations into one database transaction, with a savepoint per operation and one summed balance update per account. Each request receives its result after commit. A zero wait takes the requests already queued without waiting to fill a batch. The measurements and the path from individual commits to group commit are in [docs/performance.md](docs/performance.md).
+`BATCHED` groups up to 100 queued operations into one database transaction: the captures with one multi-row insert per table, each refund under its own savepoint, and one summed balance update per account. Each request receives its result after commit. A zero wait takes the requests already queued without waiting to fill a batch. The measurements and the path from individual commits to group commit are in [docs/performance.md](docs/performance.md).
 
 Then run:
 
@@ -173,7 +173,7 @@ Follow one capture, then one refund:
 
 1. [PaymentService.kt](src/main/kotlin/io/github/refined/morledger/payments/PaymentService.kt): the business flow, idempotency, refund locking and transaction selection. HTTP handlers are in [PaymentRoutes.kt](src/main/kotlin/io/github/refined/morledger/api/PaymentRoutes.kt) and [ReconciliationRoutes.kt](src/main/kotlin/io/github/refined/morledger/api/ReconciliationRoutes.kt).
 2. [Allocation.kt](src/main/kotlin/io/github/refined/morledger/money/Allocation.kt): money arithmetic, rounding and partial refunds. [ChartOfAccounts.kt](src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt) turns those amounts into postings.
-3. [LedgerWriter.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerWriter.kt): entry validation, account lookup and journal writes. [LedgerBatchCommit.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerBatchCommit.kt) adds the queue, savepoints and group commit.
+3. [LedgerWriter.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerWriter.kt): entry validation, account lookup and journal writes. [LedgerBatchCommit.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerBatchCommit.kt) adds the queue, set-based capture writes, savepoints and group commit.
 4. [LedgerTable.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerTable.kt): ledger SQL and mapping; `PaymentsTable` and `RefundsTable` do the same for business records. [BalanceReport.kt](src/main/kotlin/io/github/refined/morledger/reports/BalanceReport.kt) assembles the required report.
 5. [Integration tests](src/integrationTest/kotlin/io/github/refined/morledger): the HTTP scenarios against real Postgres, including retries, concurrent refunds, rollback and equivalent results in both modes. [Unit tests](src/test/kotlin/io/github/refined/morledger) cover the pure calculations and SQL builder.
 
@@ -194,7 +194,7 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
 - **Balances stored and updated synchronously, not recomputed on every read or fed from a queue.**
   - Current reports read account balances instead of summing the full posting history, and reflect committed transactions.
   - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~600–900 captures/s, the lowest when every payment goes to one merchant (a benchmark scenario).
-  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact, and it holds ~1100 rps.
+  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact. Short benchmark steps reached ~1100 rps; longer confirmation runs are still needed ([performance.md](docs/performance.md)).
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
 - **Explicit SQL with a small JDBC helper.** `*Table` objects hold queries; `${param(value)}` interpolation binds values safely. Services coordinate transactions and business rules without an ORM.
 

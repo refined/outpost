@@ -1,6 +1,7 @@
 package io.github.refined.morledger.payments
 
 import io.github.refined.morledger.db.transaction
+import io.github.refined.morledger.ledger.BatchGroup
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
 import io.github.refined.morledger.ledger.LedgerBatchCommit
@@ -48,37 +49,56 @@ class PaymentService(
             split = split,
             taxRate = taxRate,
             taxJurisdiction = jurisdiction,
-            feeRate = pricing.feeRate,
+            feeRate = pricing.feeRate.stripTrailingZeros(), // as it reads back from the database
             refundFeePolicy = pricing.refundFeePolicy,
             capturedAt = capturedAt,
             recordedAt = capturedAt, // placeholder; the stored value comes from the database
         )
+        val capture = Stored(payment, fingerprint)
 
-        return write { conn, deltas ->
-            val created = PaymentsTable.insert(conn, payment, fingerprint)
-            if (created) {
-                ledger.post(
-                    conn,
-                    NewJournalEntry(
-                        kind = EntryKind.CAPTURE,
-                        paymentId = payment.paymentId,
-                        refundId = null,
-                        effectiveAt = capturedAt,
-                        postings = ChartOfAccounts.capture(currency, jurisdiction, payment.merchantId, split),
-                    ),
-                    deltas,
-                )
-            } else {
-                val existing = PaymentsTable.find(conn, cmd.paymentId)!!
-                if (existing.fingerprint != fingerprint) {
-                    throw ConflictException(
-                        "idempotency_conflict",
-                        "payment ${cmd.paymentId} was already captured with a different payload",
-                    )
-                }
-            }
-            Recorded(details(conn, cmd.paymentId)!!, created)
+        return if (batchCommit != null) {
+            batchCommit.submit(captures, capture)
+        } else {
+            withContext(Dispatchers.IO) { dataSource.transaction { recordCaptures(it, listOf(capture), null) } }.single().getOrThrow()
         }
+    }
+
+    private val captures = BatchGroup<Stored<Payment>, Recorded<PaymentDetails>> { conn, items, deltas -> recordCaptures(conn, items, deltas) }
+
+    // One statement per table for all captures; only replays of existing ids are read back one by one.
+    private fun recordCaptures(
+        conn: Connection,
+        items: List<Stored<Payment>>,
+        deltas: MutableMap<Long, Long>?,
+    ): List<Result<Recorded<PaymentDetails>>> {
+        val firsts = items.indices.distinctBy { items[it].value.paymentId }
+        val recordedAt = PaymentsTable.insertAll(conn, firsts.map { items[it] })
+        val created = firsts.filter { items[it].value.paymentId in recordedAt }.toSet()
+        ledger.postAll(conn, created.map { captureEntry(items[it].value) }, deltas)
+        return items.mapIndexed { i, capture ->
+            if (i in created) {
+                val payment = capture.value.copy(recordedAt = recordedAt.getValue(capture.value.paymentId))
+                Result.success(Recorded(PaymentDetails(payment, emptyList()), created = true))
+            } else {
+                runCatching { replayCapture(conn, capture) }
+            }
+        }
+    }
+
+    private fun captureEntry(payment: Payment) = NewJournalEntry(
+        kind = EntryKind.CAPTURE,
+        paymentId = payment.paymentId,
+        refundId = null,
+        effectiveAt = payment.capturedAt,
+        postings = ChartOfAccounts.capture(payment.currency, payment.taxJurisdiction, payment.merchantId, payment.split),
+    )
+
+    private fun replayCapture(conn: Connection, capture: Stored<Payment>): Recorded<PaymentDetails> {
+        val paymentId = capture.value.paymentId
+        if (PaymentsTable.find(conn, paymentId)!!.fingerprint != capture.fingerprint) {
+            throw ConflictException("idempotency_conflict", "payment $paymentId was already captured with a different payload")
+        }
+        return Recorded(details(conn, paymentId)!!, created = false)
     }
 
     suspend fun refund(cmd: RefundCommand): Recorded<RefundResult> {

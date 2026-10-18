@@ -10,6 +10,9 @@ import java.time.ZoneOffset
 
 internal data class Sql(val text: String, val parameters: List<Any?>)
 
+// Multi-row statements are split well below the wire protocol's cap on bind parameters per statement.
+internal const val MAX_ROWS_PER_STATEMENT = 1000
+
 internal class SqlBuilder {
     private val parameters = mutableListOf<Any?>()
 

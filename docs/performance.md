@@ -1,10 +1,12 @@
 # Performance
 
-On a budget of **2 CPUs and 3 GB** for the whole system (app 1 CPU, Postgres 1 CPU), the service sustains:
+On a budget of **2 CPUs and 3 GB** for the whole system (app 1 CPU, Postgres 1 CPU), short 20-second steps in the 2026-10-17/18 campaign reached:
 - **~1100 requests/s** with group commit (`BALANCE_MODE=BATCHED`);
 - **600–900 requests/s** with the default one-transaction-per-request mode (`STORED`).
 
 Both keep p95 latency at 3–4 ms at 300 requests/s, and both keep balances exact. We started at ~300 requests/s. The table and chart below show what each step changed.
+
+These are exploratory measurements, not validated sustained capacity. Their limits: unequal preload sizes, short steps that can stop early, and no repeats. Small differences between stages should not be attributed to code changes.
 
 ```mermaid
 xychart-beta
@@ -107,8 +109,8 @@ Stage 1, commit `0ffcf3f`. Every method was capped near 300 req/s by the 3 reque
 | 6 → 7 refactor | 1100 → 1100 | — | 970 → 938 |
 
 `STORED` over the same steps: 300 → 600 → 800 → 700 → 900.
-- Its ceiling moves by ±200 between runs of the same code, because it saturates on row locks and the lock queue is erratic.
-- `BATCHED` is stable within one 100 req/s step.
+- The STORED values differ across commits and preload sizes; this campaign does not establish repeatability of the same code or prove the cause of that variation.
+- BATCHED results cluster within one 100 req/s step across stages 4–7; repeated runs are needed to measure its variability.
 
 ### Latency
 
@@ -139,7 +141,7 @@ Stage 1, commit `0ffcf3f`. Every method was capped near 300 req/s by the 3 reque
 
   | | `STORED` | `BATCHED` |
   |---|---|---|
-  | `commit` (the WAL flush) | 37% | 47% |
+  | JDBC `commit` call | 37% | 47% |
   | balance `UPDATE`s | 31% | 8% |
   | inserts | the rest | entry, postings and payment inserts, the rest |
 

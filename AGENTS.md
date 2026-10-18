@@ -17,7 +17,7 @@ Working context for AI coding agents (and humans) in this repo: what is decided,
   - a deterministic ~100k-payment demo dataset;
   - two balance modes, `STORED` and `BATCHED` (group commit), chosen after benchmarking (docs/performance.md); computed, snapshot, sharded and TigerBeetle variants were measured and removed (commit `0ffcf3f` has them).
 
-  59 tests: 24 unit, 35 integration. CI runs the Docker path.
+  61 tests: 24 unit, 37 integration. CI runs the Docker path.
 - **Platforms:** must run on macOS, Linux and Windows. This is guaranteed by running everything in Linux containers (Docker / Docker Desktop).
 - **What is judged:** reasoning and trade-offs as much as the code. Every ambiguity gets an explicit, documented decision.
 
@@ -64,7 +64,7 @@ src/main/kotlin/io/github/refined/morledger/
   ledger/Model.kt                ledger models + pure validatedPostings
   ledger/LedgerTable.kt          SQL + mapping: accounts, journal, postings, balances, verify
   ledger/LedgerWriter.kt         posting validation, account-id cache, ordered writes, immediate or collected balance deltas
-  ledger/LedgerBatchCommit.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, savepoint per request, one balance UPDATE per account
+  ledger/LedgerBatchCommit.kt       BALANCE_MODE=BATCHED: one writer, batches in one tx, set-based groups (captures), savepoint per other request, one balance UPDATE per account
   ledger/ChartOfAccounts.kt      account codes + postings for capture/refund
   payments/                      PaymentService (tx, idempotency, locking), PaymentsTable + RefundsTable (SQL), Model (+ DomainException types)
   reports/BalanceReport.kt       ledger balances -> report
@@ -203,7 +203,7 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 19 | Schema evolution | No users yet: one migration (`V1__schema.sql`) edited in place; no compatibility shims |
 | 20 | Build tooling | No Gradle wrapper; build in the `gradle:9.8.1-jdk21` image; versions inline in `build.gradle.kts`; CI = docker job only |
 | 21 | README | Short; the user's structure: what/why → how it works (UI, Swagger, API with only the 3 endpoints from the brief, diagram) → how the ledger works → install/config → code reading guide → short assumptions and trade-offs. The walkthrough selects `BATCHED` with a `.env` override and links to the benchmark history; the runtime default remains `STORED`. Details go to `docs/design.md` |
-| 22 | Balance modes | `BALANCE_MODE=STORED` (default): one tx per request. `BATCHED`: group commit (`LedgerBatchCommit`): a single writer runs queued requests in batches, one tx, savepoint per request, one summed balance UPDATE per account, answers after commit, per-item retry if the commit fails. Balances exact in both; a test proves identical reports |
+| 22 | Balance modes | `BALANCE_MODE=STORED` (default): one tx per request. `BATCHED`: group commit (`LedgerBatchCommit`): a single writer runs queued requests in batches, one tx: captures as a `BatchGroup` (one multi-row INSERT per table, response from memory, only replays read back), refunds each under a savepoint, one summed balance UPDATE per account, answers after commit, per-item retry if the commit fails. Balances exact in both; a test proves identical reports |
 | 23 | Removed variants (2026-10-16) | COMPUTED (slow reads), snapshot + tail (reads pay the tail), snapshot-only (stale, writes no cheaper), hot-account sharding (test uninformative: merchant row not sharded, CPU-bound) and the TigerBeetle engine (starved by 2.3 GB static memory + dual write). Findings in docs/performance.md and docs/ledger-comparison.md; code at commit `0ffcf3f` |
 | 24 | Analytics | Computed from the business tables; `reconciled` = records-based merchant balance == ledger balance |
 | 25 | Console | Pages: Overview / Merchants / Merchant / Ledger / Simulate; server-side aggregates and paging for the 100k dataset; no dual-axis charts (balance has its own chart) |
@@ -211,11 +211,13 @@ The README is the reviewer-facing source of truth (worked example, Assumptions, 
 | 27 | Benchmark | k6 (Go engine, JS scenarios; user decision to keep it over Gatling/Kotlin). 2 CPUs / 3 GB per variant: app 1.0/1280M + db 1.0/1792M. Ladders start at 400, climb by 200 while a step holds (served ≥ 95%, p95 < 250 ms, < 1% errors), then try 100 below the first failure; failing steps abort early. Profile at 300/s: docker stats + pg_stat_statements without a profiler, JFR in a separate step. Variants are presets or `name:SETTING=value`; `results.json` per run. The published numbers come from one campaign (2026-10-17/18): every stage from its own commit via a worktree, mains power, quiet host |
 | 28 | Blocking JDBC in Ktor | Route handlers run database work in `blocking { }` = `withContext(Dispatchers.IO)` (`api/Routes.kt`). With a 1-CPU container Ktor has only 3 request threads; blocking JDBC on them capped concurrency at 3 (found with JFR, 2026-10-17). Next steps if needed: virtual threads, then an async driver |
 | 29 | Batch commit wait | `LedgerBatchCommit.submit` is `suspend` and awaits its batch (`CompletableFuture.await`); a waiting request holds no thread. `PaymentService.capture/refund` are `suspend`; `STORED` runs on `Dispatchers.IO` inside the service |
-| 30 | JDBC batching | Hikari property `reWriteBatchedInserts=true`: a capture's postings go as one multi-row INSERT. Measured neutral on throughput, kept for fewer round trips. Grouping a whole batch's SQL by hand was estimated and skipped |
-| 31 | SQL layer (2026-10-17) | Stateless `internal object *Table` components own SQL and row mapping; a Table may span related physical tables. `LedgerWriter` owns validation, account caching and posting coordination; `LedgerBatchCommit` owns queue/savepoints/commit/retry. `AnalyticsTable` owns queries; `Analytics` assembles reports. Safe `sql { "... ${param(value)}" }` keeps values as JDBC parameters; dynamic filters register values in the same builder. No ORM or new dependency. |
+| 30 | Set-based batch writes (2026-10-18) | `BATCHED` writes a batch's captures with one multi-row INSERT per table (payments `ON CONFLICT DO NOTHING RETURNING`, entries, postings; ≤ 1000 rows per statement), builds responses from memory and reads back only replays. Before, the single writer ran ~7 round trips per capture (~0.85 ms, writer 92% busy), which capped `BATCHED` at ~1000/s. A first short run held 3000 captures/s (the ladder's top) and 1400 hot; the full re-run is pending. `reWriteBatchedInserts` was dropped: no batched INSERT is left |
+| 31 | SQL layer (2026-10-17) | Stateless `internal object *Table` components own SQL and row mapping; a Table may span related physical tables. `LedgerWriter` owns validation, account caching and posting coordination; `LedgerBatchCommit` owns queue/groups/savepoints/commit/retry. `AnalyticsTable` owns queries; `Analytics` assembles reports. Safe `sql { "... ${param(value)}" }` keeps values as JDBC parameters; dynamic filters register values in the same builder. No ORM or new dependency. |
 | 32 | Performance page | Console page `#/performance` reads the static `web/ui/performance.json` (curated from the campaign's `results.json`): KPI tiles, the per-stage chart (STORED vs BATCHED, scenario switch) with a table view, the six starting methods. `docs/performance.md` is the long form: results first, the story, deep dive, setup, method |
 
 ## Ideas not done (candidates if time allows)
+
+- Benchmark audit (2026-10-18): the night campaign is exploratory, not sustained-capacity validation. Targeted confirmation still needed: equal datasets, repeated longer steps, separate batch cap/wait comparisons, and strict harness error handling. No confirmation rerun has been performed yet.
 
 - Bitemporal `asOf` + `knownAt` reporting; closed periods.
 - Payout / settlement / tax remittance entries (designs are in the README's out-of-scope table).
