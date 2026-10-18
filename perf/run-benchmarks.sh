@@ -7,8 +7,9 @@
 #   perf/run-benchmarks.sh "pg-computed:BALANCE_MODE=COMPUTED" # name:settings, for variants of older commits
 #   QUICK=1 perf/run-benchmarks.sh ...                       # 10k preload only, no 100k report
 #
-# Each scenario's ladder starts at START_RATE (400) and climbs by 200 while steps hold; after the first failing step it
-# tries 100 below. If the first step fails it steps down by 100. A step that clearly cannot hold stops early
+# Each scenario's ladder starts at START_CAPTURE / START_HOT / START_MIXED, or START_RATE (400), and climbs by 200 up to
+# MAX_RATE (6000) while steps hold; after the first failing step it tries 100 below. If the first step fails it steps
+# down by 100. Every step also samples CPU per container (docker stats). A step that clearly cannot hold stops early
 # (k6 thresholds with abortOnFail), followed by a short cool-down.
 #
 # Every variant also gets a profile at a fixed 300 rps: docker stats (CPU per container) and pg_stat_statements
@@ -28,7 +29,7 @@ mkdir -p "$OUTDIR"
 PROJECT=${COMPOSE_PROJECT_NAME:-$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]')}
 BASE_URL="http://127.0.0.1:${APP_HOST_PORT:-8090}"
 START_RATE=${START_RATE:-400}
-MAX_RATE=3000
+MAX_RATE=${MAX_RATE:-6000}
 RATES=(); for ((r = 100; r <= MAX_RATE; r += 100)); do RATES+=("$r"); done
 STEP_SECONDS=20
 COOL_DOWN_SECONDS=5
@@ -67,12 +68,14 @@ psql_q() { "${COMPOSE[@]}" exec -T postgres psql -U mor -d mor_ledger -At -F'|' 
 
 # docker stats once a second: "app CPU %,postgres CPU %" per line (100% = one core).
 sample_cpu() {
-  local end=$((SECONDS + PROFILE_SECONDS))
+  local end=$((SECONDS + ${2:-$PROFILE_SECONDS}))
   while [ $SECONDS -lt $end ]; do
     docker stats --no-stream --format '{{.Name}} {{.CPUPerc}}' "$PROJECT-app-1" "$PROJECT-postgres-1" |
       awk -v app="$PROJECT-app-1" -v pg="$PROJECT-postgres-1" '{ gsub("%", "", $2); v[$1] = $2 } END { print v[app] "," v[pg] }'
   done > "$1"
 }
+
+pct() { awk -v c="$1" 'BEGIN { if (c == "null" || c == "") printf "?"; else printf "%d%%", 100 * c + 0.5 }'; }
 
 cpu_avg() { awk -F, -v col="$2" '$col != "" { s += $col; n++ } END { if (n) printf "%.2f", s / n / 100; else printf "null" }' "$1" 2>/dev/null || echo null; }
 
@@ -106,9 +109,11 @@ step() {
   local f="$OUTDIR/$VARIANT-$1-$2"
   sample_waits "$f.waits" &
   local sampler=$!
+  sample_cpu "$f.cpu" "$STEP_SECONDS" &
+  local cpu=$!
   SCRIPT=bench.js k6 -e SCENARIO="$1" -e RATE="$2" -e DURATION=${STEP_SECONDS}s -e ABORT=1 -e OUT="$STAMP/$VARIANT-$1-$2" -e RUN="$1$2"
-  kill "$sampler" 2>/dev/null || true
-  wait "$sampler" 2>/dev/null || true
+  kill "$sampler" "$cpu" 2>/dev/null || true
+  wait "$sampler" "$cpu" 2>/dev/null || true
 }
 
 holds() { grep -q '"holds":true' "$OUTDIR/$VARIANT-$1-$2.json" 2>/dev/null; }
@@ -117,7 +122,8 @@ holds() { grep -q '"holds":true' "$OUTDIR/$VARIANT-$1-$2.json" 2>/dev/null; }
 cool_down() { sleep "$COOL_DOWN_SECONDS"; }
 
 ladder() {
-  local s=$1 r=$START_RATE
+  local s=$1 start="START_${1^^}"
+  local r=${!start:-$START_RATE}
   step "$s" "$r"
   if holds "$s" "$r"; then
     while [ $((r + 200)) -le $MAX_RATE ]; do
@@ -178,12 +184,14 @@ run_variant() {
 field() { grep -o "\"$2\":[^,}]*" "$1" 2>/dev/null | head -1 | cut -d: -f2- | tr -d '"' || true; }
 num() { local v; v=$(field "$1" "$2"); echo "${v:-null}"; }
 
-# Highest rate that held in a scenario: "rate|p95|lock%|io%", or empty.
+# Highest rate that held in a scenario: "rate|p95|lock%|io%|app cores|postgres cores", or empty.
 best_step() {
   local best="" f r
   for r in "${RATES[@]}"; do
     f="$OUTDIR/$1-$2-$r.json"
-    if [ -f "$f" ] && grep -q '"holds":true' "$f"; then best="$r|$(field "$f" p95)|$(wait_pct "${f%.json}.waits" 2)|$(wait_pct "${f%.json}.waits" 3)"; fi
+    if [ -f "$f" ] && grep -q '"holds":true' "$f"; then
+      best="$r|$(field "$f" p95)|$(wait_pct "${f%.json}.waits" 2)|$(wait_pct "${f%.json}.waits" 3)|$(cpu_avg "${f%.json}.cpu" 1)|$(cpu_avg "${f%.json}.cpu" 2)"
+    fi
   done
   echo "$best"
 }
@@ -196,7 +204,7 @@ sql_per_capture() {
 }
 
 results_json() {
-  local commit v s b first=1 seed best app pg rps sql
+  local commit v s b first=1 seed best app pg rps sql r p95 lock io bapp bpg
   commit=$(git rev-parse --short HEAD 2>/dev/null || echo "")
   echo "{\"stamp\":\"$STAMP\",\"commit\":\"$commit\",\"variants\":["
   for v in "$@"; do
@@ -209,8 +217,8 @@ results_json() {
     for s in capture hot mixed; do
       best=$(best_step "$v" "$s")
       if [ -n "$best" ]; then
-        IFS='|' read -r r p95 lock io <<< "$best"
-        printf ',"%s":{"rps":%s,"p95":%s,"lockWaitPct":%s,"ioWaitPct":%s}' "$s" "$r" "${p95:-null}" "$lock" "$io"
+        IFS='|' read -r r p95 lock io bapp bpg <<< "$best"
+        printf ',"%s":{"rps":%s,"p95":%s,"lockWaitPct":%s,"ioWaitPct":%s,"appCores":%s,"postgresCores":%s}' "$s" "$r" "${p95:-null}" "$lock" "$io" "$bapp" "$bpg"
       else
         printf ',"%s":null' "$s"
       fi
@@ -226,7 +234,7 @@ results_json() {
 }
 
 summarise() {
-  local md="$OUTDIR/summary.md" v s r f b best rps app pg sql seed
+  local md="$OUTDIR/summary.md" v s r f b best rps app pg sql seed p95 lock io bapp bpg
   results_json "$@" > "$OUTDIR/results.json"
   {
     echo "# Benchmark $STAMP"
@@ -235,22 +243,20 @@ summarise() {
     echo
     echo "## Highest holding rate per scenario (keeps up, p95 < 250 ms, errors < 1%)"
     echo
-    echo "Lock / IO: share of active Postgres backends waiting on a row lock / on IO at that step."
+    echo "CPU: average over that step, % of each container's 1-CPU quota (docker stats)."
     echo
-    echo "| Variant | capture (100 merchants) | hot (1 merchant) | mixed (85/10/5) |"
-    echo "|---|---|---|---|"
+    echo "| Variant | Scenario | rps | p95, ms | app CPU | Postgres CPU | lock wait | IO wait |"
+    echo "|---|---|---|---|---|---|---|---|"
     for v in "$@"; do
-      row="| $v |"
       for s in capture hot mixed; do
         best=$(best_step "$v" "$s")
         if [ -n "$best" ]; then
-          IFS='|' read -r r p95 lock io <<< "$best"
-          row="$row $r/s (p95 $p95 ms; lock $lock%, IO $io%) |"
+          IFS='|' read -r r p95 lock io bapp bpg <<< "$best"
+          echo "| $v | $s | $r | $p95 | $(pct "$bapp") | $(pct "$bpg") | $lock% | $io% |"
         else
-          row="$row none |"
+          echo "| $v | $s | none | | | | | |"
         fi
       done
-      echo "$row"
     done
     echo
     echo "## Bulk ingest and report latency"
@@ -285,10 +291,10 @@ summarise() {
     echo
     echo "## All steps"
     echo
-    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Seconds | Lock wait | IO wait | Holds |"
-    echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+    echo "| Variant | Scenario | Target/s | Achieved/s | p50 | p95 | p99 | Errors | Dropped | Seconds | App CPU | Postgres CPU | Lock wait | IO wait | Holds |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
     for v in "$@"; do for s in capture hot mixed; do for r in "${RATES[@]}"; do f="$OUTDIR/$v-$s-$r.json"; [ -f "$f" ] || continue
-      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(field "$f" seconds) | $(wait_pct "${f%.json}.waits" 2)% | $(wait_pct "${f%.json}.waits" 3)% | $(field "$f" holds) |"
+      echo "| $v | $s | $r | $(field "$f" achievedRps) | $(field "$f" p50) | $(field "$f" p95) | $(field "$f" p99) | $(field "$f" errorRate) | $(field "$f" dropped) | $(field "$f" seconds) | $(pct "$(cpu_avg "${f%.json}.cpu" 1)") | $(pct "$(cpu_avg "${f%.json}.cpu" 2)") | $(wait_pct "${f%.json}.waits" 2)% | $(wait_pct "${f%.json}.waits" 3)% | $(field "$f" holds) |"
     done; done; done
     echo
     echo "## Consistency after each run"
