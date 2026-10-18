@@ -8,14 +8,14 @@ Both keep p95 latency at 3–4 ms at 300 requests/s, and both keep balances exac
 
 ```mermaid
 xychart-beta
-    title "Highest sustained rate, mixed load (req/s). Bars: STORED. Line: BATCHED (stage 1 had no batching)"
+    title "Mixed load, req/s: bars STORED, line BATCHED"
     x-axis ["1 Start", "2 Group commit", "3 Non-blocking DB", "4 No trigger", "5 await", "6 Batched inserts", "7 Final"]
     y-axis "requests/s" 0 --> 1200
     bar [300, 300, 600, 800, 800, 700, 900]
     line [300, 300, 800, 1100, 1100, 1100, 1100]
 ```
 
-The same chart, interactive and per scenario, is on the console's **Performance** page (`/ui/#/performance`).
+Stage 1 had no batching, so the line starts at the STORED value. The same chart, interactive and per scenario, is on the console's **Performance** page (`/ui/#/performance`).
 
 ## Results
 
