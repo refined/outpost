@@ -70,7 +70,7 @@ src/main/kotlin/io/github/refined/morledger/
   reports/BalanceReport.kt       ledger balances -> report
   reports/Analytics.kt           report assembly, time-series gap filling, reconciliation
   reports/AnalyticsTable.kt      SQL aggregates from payments + refunds
-  api/                           Routes, AnalyticsRoutes, Dto (wire format), Errors (DomainException -> HTTP status)
+  api/                           Routes (base routes + /v1 wiring), PaymentRoutes, ReconciliationRoutes, AnalyticsRoutes, Dto (wire format), Errors (DomainException -> HTTP status)
   db/Database.kt                 Hikari + Flyway, DataSource.transaction { }
   db/Sql.kt                      safe sql { "... ${param(value)}" }, JDBC query/update/batch, UTC binding
 src/main/resources/
@@ -104,7 +104,7 @@ gradle run                    # service on http://localhost:8090 (stop the app c
 
 Environment variables: `PORT` (8090), `DB_URL` (`jdbc:postgresql://localhost:5442/mor_ledger`), `DB_USER`, `DB_PASSWORD`, `MOR_FEE_RATE` (0.05), `REFUND_FEE_POLICY` (`MOR_KEEPS_FEE` | `MOR_RETURNS_FEE`), `BALANCE_MODE` (`STORED` | `BATCHED`), `BATCH_MAX_SIZE` (100), `BATCH_MAX_WAIT_MS` (0).
 
-URLs: `/ui/` demo console, `/docs/` Swagger, `/openapi.yaml` spec. **Keep `openapi.yaml` in sync with `api/Dto.kt` and `api/Routes.kt`.**
+URLs: `/ui/` demo console, `/docs/` Swagger, `/openapi.yaml` spec. **Keep `openapi.yaml` in sync with `api/Dto.kt` and the `api/*Routes.kt` files.**
 
 Tests use `TestDatabase`:
 - if `TEST_DB_URL` (+ `TEST_DB_USER`, `TEST_DB_PASSWORD`) is set, they use that database;

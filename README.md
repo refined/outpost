@@ -171,7 +171,7 @@ The optional benchmark is described in [docs/performance.md](docs/performance.md
 
 Follow one capture, then one refund:
 
-1. [PaymentService.kt](src/main/kotlin/io/github/refined/morledger/payments/PaymentService.kt): the business flow, idempotency, refund locking and transaction selection. HTTP handlers are in [Routes.kt](src/main/kotlin/io/github/refined/morledger/api/Routes.kt).
+1. [PaymentService.kt](src/main/kotlin/io/github/refined/morledger/payments/PaymentService.kt): the business flow, idempotency, refund locking and transaction selection. HTTP handlers are in [PaymentRoutes.kt](src/main/kotlin/io/github/refined/morledger/api/PaymentRoutes.kt) and [ReconciliationRoutes.kt](src/main/kotlin/io/github/refined/morledger/api/ReconciliationRoutes.kt).
 2. [Allocation.kt](src/main/kotlin/io/github/refined/morledger/money/Allocation.kt): money arithmetic, rounding and partial refunds. [ChartOfAccounts.kt](src/main/kotlin/io/github/refined/morledger/ledger/ChartOfAccounts.kt) turns those amounts into postings.
 3. [LedgerWriter.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerWriter.kt): entry validation, account lookup and journal writes. [LedgerBatchCommit.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerBatchCommit.kt) adds the queue, savepoints and group commit.
 4. [LedgerTable.kt](src/main/kotlin/io/github/refined/morledger/ledger/LedgerTable.kt): ledger SQL and mapping; `PaymentsTable` and `RefundsTable` do the same for business records. [BalanceReport.kt](src/main/kotlin/io/github/refined/morledger/reports/BalanceReport.kt) assembles the required report.
