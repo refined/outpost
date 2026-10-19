@@ -47,7 +47,7 @@ preset() {
   esac
 }
 
-k6() { "${COMPOSE[@]}" run --rm --no-deps -e VARIANT="$VARIANT" "$@" k6 run --quiet "${SCRIPT}" 2>&1 | grep -E "^(local|pg-|tigerbeetle|seed:)" || true; }
+k6() { "${COMPOSE[@]}" run --rm --no-deps -e VARIANT="$VARIANT" "$@" k6 run --quiet "${SCRIPT}" 2>&1 | grep -E "target=|^seed:" || true; }
 
 # Samples pg_stat_activity 5 times a second for one step: "active,waiting on a lock,waiting on IO" per line.
 # psql ends by itself after the step (\watch c=N), so nothing is left running in the container.
@@ -241,7 +241,7 @@ summarise() {
     echo
     echo "Commit $(git rev-parse --short HEAD 2>/dev/null || echo '?'). Budget: 2 CPUs and 3 GB for the system under test; k6 outside the limit. Docker $(docker version --format '{{.Server.Version}}'), $(docker info --format '{{.NCPU}} CPUs / {{.MemTotal}} bytes') host VM."
     echo
-    echo "## Highest holding rate per scenario (keeps up, p95 < 250 ms, errors < 1%)"
+    echo "## Highest holding rate per scenario (keeps up, p95 < 200 ms, errors < 1%)"
     echo
     echo "CPU: average over that step, % of each container's 1-CPU quota (docker stats)."
     echo

@@ -617,7 +617,7 @@ async function performancePage() {
       ${kpi("Budget", esc(data.budget), esc(data.conditions))}
     </div>
     <div class="card" style="margin-top:16px">
-      <div class="card-head"><h2>How each step moved the ceiling</h2><span class="hint">highest arrival rate held with p95 &lt; 250 ms and &lt; 1% errors</span><span class="spacer"></span>
+      <div class="card-head"><h2>How each step moved the ceiling</h2><span class="hint">highest arrival rate held with p95 &lt; 200 ms and &lt; 1% errors</span><span class="spacer"></span>
         <div class="seg" id="p-sc">${Object.entries(SCENARIOS).map(([k, l]) => `<button type="button" data-s="${k}" class="${k === sc ? "on" : ""}">${l}</button>`).join("")}</div></div>
       <div style="height:320px"><canvas id="p-chart" role="img" aria-label="Highest holding rate per stage for STORED and BATCHED"></canvas></div>
       <details class="data-table"><summary>Show as a table</summary><div class="scroll"><table>

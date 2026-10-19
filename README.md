@@ -193,8 +193,8 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
 - **Own ledger on Postgres instead of TigerBeetle or Formance.** The payment and its journal entry commit in one transaction. An external ledger would turn every payment into a write to two systems that can disagree. We integrated TigerBeetle and measured it: under the same 2 CPU / 3 GB budget it was the slowest variant, so it was removed. The ledger is a small module that knows nothing about payments, so it can still be replaced.
 - **Balances stored and updated synchronously, not recomputed on every read or fed from a queue.**
   - Current reports read account balances instead of summing the full posting history, and reflect committed transactions.
-  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~600–900 captures/s, the lowest when every payment goes to one merchant (a benchmark scenario).
-  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact. Short benchmark steps reached ~1100 rps; longer confirmation runs are still needed ([performance.md](docs/performance.md)).
+  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~700–900 requests/s, the lowest when every payment goes to one merchant (a benchmark scenario).
+  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact. Its captures are written as sets, one multi-row insert per table, so short benchmark steps reached 3500 mixed requests/s and 5200 captures/s with p95 under 200 ms ([performance.md](docs/performance.md)).
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
 - **Explicit SQL with a small JDBC helper.** `*Table` objects hold queries; `${param(value)}` interpolation binds values safely. Services coordinate transactions and business rules without an ORM.
 
@@ -204,5 +204,5 @@ More, including concurrency alternatives, time handling, and what each out-of-sc
 
 - [docs/requirements.md](docs/requirements.md): what we set out to build.
 - [docs/design.md](docs/design.md): all decisions and trade-offs, tests, CI, configuration, code layout.
-- [docs/domain/](docs/domain/): background on the MoR model and EU VAT.
+- [docs/domain/](docs/domain): background on the MoR model and EU VAT.
 - [AGENTS.md](AGENTS.md): working notes for contributors and AI agents.
