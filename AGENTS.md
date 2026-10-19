@@ -128,6 +128,13 @@ Rules:
 
 ## Environment notes
 
+- **Live demo: https://mor.gamx.dev** (2026-10-19), on the Hetzner box shared with share.travel and nevis.gamx.dev.
+  - `/opt/mor` holds a `git archive HEAD` plus two server-only files, never in the repo:
+    - `compose.gamx.yml`: no published ports; 1 CPU / 768 MB each; the app on `docker_default` as `mor-app`; Postgres aliased `mor-postgres`, because on `docker_default` the name `postgres` is share.travel's database;
+    - `.env`: `COMPOSE_PROJECT_NAME=mor`, `COMPOSE_FILE`, a random `POSTGRES_PASSWORD`, `BATCHED`.
+  - Caddy: `/opt/caddy-sites/mor.caddy` in the shared `sharetravel-caddy`, Cloudflare-only guard, `noindex`.
+  - Update: archive, untar over `/opt/mor`, `docker compose up -d --build --wait`.
+  - Remove: `docker compose down -v`, delete `mor.caddy`, `caddy reload`, `rm -rf /opt/mor`, and drop the footer link in `/opt/sites/gamx/index.html`.
 - The development machine runs Windows. Git Bash and PowerShell are both available. `.gitattributes` forces LF everywhere, so Docker build inputs are the same on every OS.
 - Ports 5432 and 8080 are often taken by other local projects, which is why the defaults are 5442 and 8090. Windows reserves some high port ranges (e.g. 55389–55488), so don't pick ports there.
 - `system-design/` is a local-only, gitignored folder. Never add it to git or link to it. Domain material that should be public lives in `docs/domain/`.

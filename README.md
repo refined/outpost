@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/refined/outpost/actions/workflows/ci.yml/badge.svg)](https://github.com/refined/outpost/actions/workflows/ci.yml)
 
+**Live demo: [mor.gamx.dev](https://mor.gamx.dev/ui/)**: the console with ~100k demo payments, [Swagger](https://mor.gamx.dev/docs/), `BALANCE_MODE=BATCHED`. It is open, so anyone can add payments and refunds.
+
 ## What it is and why
 
 A **Merchant of Record (MoR)** sells a merchant's product in its own name. It:
