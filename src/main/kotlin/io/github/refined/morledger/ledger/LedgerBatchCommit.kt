@@ -9,7 +9,6 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import javax.sql.DataSource
 
-/** Writes all of a batch's items of one kind with set-based statements. A failed item must not have written anything. */
 fun interface BatchGroup<I, R> {
     fun write(conn: Connection, items: List<I>, deltas: MutableMap<Long, Long>): List<Result<R>>
 }

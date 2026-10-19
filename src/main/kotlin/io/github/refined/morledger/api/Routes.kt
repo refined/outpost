@@ -53,8 +53,7 @@ fun Application.routes(
     }
 }
 
-// JDBC blocks its thread, and Ktor has only a few request threads (sized by CPU count, 3 with a 1-CPU limit):
-// database work runs on the IO pool, so a request waiting for Postgres does not hold up the others.
+// Ktor sizes its request threads by CPU count (3 on one CPU); blocking JDBC must not occupy them.
 internal suspend fun <T> blocking(block: () -> T): T = withContext(Dispatchers.IO) { block() }
 
 internal fun parseLimit(value: String?, default: Int): Int = value?.let {

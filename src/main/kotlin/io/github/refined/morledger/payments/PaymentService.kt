@@ -65,7 +65,6 @@ class PaymentService(
 
     private val captures = BatchGroup<Stored<Payment>, Recorded<PaymentDetails>> { conn, items, deltas -> recordCaptures(conn, items, deltas) }
 
-    // One statement per table for all captures; only replays of existing ids are read back one by one.
     private fun recordCaptures(
         conn: Connection,
         items: List<Stored<Payment>>,
@@ -164,7 +163,6 @@ class PaymentService(
         dataSource.transaction { details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")
 
-    // STORED blocks on JDBC, so it runs on the IO pool; BATCHED only waits for the writer thread, suspended.
     private suspend fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
         if (batchCommit != null) batchCommit.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
 

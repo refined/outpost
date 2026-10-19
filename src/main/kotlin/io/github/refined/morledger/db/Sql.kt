@@ -10,8 +10,10 @@ import java.time.ZoneOffset
 
 internal data class Sql(val text: String, val parameters: List<Any?>)
 
-// Multi-row statements are split well below the wire protocol's cap on bind parameters per statement.
-internal const val MAX_ROWS_PER_STATEMENT = 1000
+// The Bind message counts parameters in a 16-bit field; 32767 is safe for every pgjdbc version.
+internal const val MAX_PARAMETERS_PER_STATEMENT = 32_767
+
+internal fun <T> List<T>.chunkedForParameters(perRow: Int): List<List<T>> = chunked(MAX_PARAMETERS_PER_STATEMENT / perRow)
 
 internal class SqlBuilder {
     private val parameters = mutableListOf<Any?>()
@@ -21,7 +23,10 @@ internal class SqlBuilder {
         return "?"
     }
 
-    internal fun build(text: String) = Sql(text.trimIndent(), parameters.toList())
+    internal fun build(text: String): Sql {
+        check(parameters.size <= MAX_PARAMETERS_PER_STATEMENT) { "${parameters.size} parameters in one statement; chunk the rows" }
+        return Sql(text.trimIndent(), parameters.toList())
+    }
 }
 
 internal fun sql(block: SqlBuilder.() -> String): Sql = SqlBuilder().run { build(block()) }

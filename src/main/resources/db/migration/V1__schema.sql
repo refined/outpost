@@ -1,6 +1,6 @@
 -- Invariants enforced here, not only in code: entries, postings, payments and refunds are append-only; an account
 -- can change only its running balance. That every entry balances in one currency is enforced in code
--- (Ledger.validated) and detected by /v1/ledger/verify.
+-- (validatedPostings) and detected by /v1/ledger/verify.
 -- TRUNCATE is not blocked: tests use it to reset state.
 
 CREATE SCHEMA ledger;

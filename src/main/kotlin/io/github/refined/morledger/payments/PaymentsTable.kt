@@ -1,6 +1,6 @@
 package io.github.refined.morledger.payments
 
-import io.github.refined.morledger.db.MAX_ROWS_PER_STATEMENT
+import io.github.refined.morledger.db.chunkedForParameters
 import io.github.refined.morledger.db.instant
 import io.github.refined.morledger.db.query
 import io.github.refined.morledger.db.sql
@@ -17,9 +17,8 @@ internal object PaymentsTable {
         fee_rate, refund_fee_policy, captured_at, recorded_at, fingerprint
     """
 
-    /** Inserts the new payments and returns recorded_at by payment id; ids that already exist are skipped. */
     fun insertAll(conn: Connection, payments: List<Stored<Payment>>): Map<String, Instant> =
-        payments.chunked(MAX_ROWS_PER_STATEMENT).flatMap { chunk ->
+        payments.chunkedForParameters(perRow = 13).flatMap { chunk ->
             conn.query(sql {
                 """
                 INSERT INTO payments (payment_id, merchant_id, currency, amount, tax_amount, fee_amount, merchant_amount,

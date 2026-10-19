@@ -1,7 +1,7 @@
 package io.github.refined.morledger.ledger
 
-import io.github.refined.morledger.db.MAX_ROWS_PER_STATEMENT
 import io.github.refined.morledger.db.batch
+import io.github.refined.morledger.db.chunkedForParameters
 import io.github.refined.morledger.db.instant
 import io.github.refined.morledger.db.query
 import io.github.refined.morledger.db.sql
@@ -12,12 +12,11 @@ import java.sql.ResultSet
 import java.time.Instant
 
 internal object LedgerTable {
-    /** Entry ids in the order of [entries]; each entry must have its own (kind, paymentId, refundId). */
     fun insertEntries(conn: Connection, entries: List<NewJournalEntry>): List<Long> {
         val keys = entries.map { Triple(it.kind.name, it.paymentId, it.refundId) }
         require(keys.distinct().size == keys.size) { "entries in one insert must have distinct keys" }
         // RETURNING has no guaranteed row order, so ids are matched back by key.
-        val ids = entries.chunked(MAX_ROWS_PER_STATEMENT).flatMap { chunk ->
+        val ids = entries.chunkedForParameters(perRow = 4).flatMap { chunk ->
             conn.query(sql {
                 """
                 INSERT INTO ledger.journal_entries (kind, payment_id, refund_id, effective_at)
@@ -30,7 +29,7 @@ internal object LedgerTable {
     }
 
     fun insertPostings(conn: Connection, postings: List<NewPosting>) {
-        postings.chunked(MAX_ROWS_PER_STATEMENT).forEach { chunk ->
+        postings.chunkedForParameters(perRow = 3).forEach { chunk ->
             conn.update(sql {
                 """
                 INSERT INTO ledger.postings (entry_id, account_id, amount)

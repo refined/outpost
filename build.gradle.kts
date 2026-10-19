@@ -1,8 +1,6 @@
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-// Built inside Docker with the official gradle:9.8.1-jdk21 image (see Dockerfile); no wrapper is needed.
-
 plugins {
     kotlin("jvm") version "2.4.21"
     kotlin("plugin.serialization") version "2.4.21"
@@ -47,8 +45,6 @@ dependencies {
     runtimeOnly("ch.qos.logback:logback-classic:1.6.5")
 }
 
-// Two suites: `test` = unit tests of pure code (no database, no app); `integrationTest` = the service through its
-// HTTP API against a real Postgres. `gradle check` runs both.
 testing {
     suites {
         withType<JvmTestSuite>().configureEach {

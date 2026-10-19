@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test
 import java.math.BigDecimal
 import java.time.Instant
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 
 class SqlTest {
@@ -66,5 +67,20 @@ class SqlTest {
         assertEquals("SELECT payment_id\nFROM payments\nWHERE payment_id = ?", query.text)
         assertEquals(listOf(input), query.parameters)
         assertFalse(query.text.contains(input))
+    }
+
+    @Test
+    fun `rows are chunked so a statement stays under the parameter limit`() {
+        // 32767 / 13 = 2520 payments per INSERT.
+        val chunks = List(10_000) { it }.chunkedForParameters(perRow = 13)
+
+        assertEquals(listOf(2_520, 2_520, 2_520, 2_440), chunks.map { it.size })
+    }
+
+    @Test
+    fun `a statement over the parameter limit is refused before it reaches the driver`() {
+        assertFailsWith<IllegalStateException> {
+            sql { "VALUES " + List(MAX_PARAMETERS_PER_STATEMENT + 1) { "(${param(it)})" }.joinToString(", ") }
+        }
     }
 }
