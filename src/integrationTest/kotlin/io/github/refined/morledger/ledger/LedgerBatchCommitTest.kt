@@ -25,16 +25,23 @@ class LedgerBatchCommitTest {
     @Test
     fun `a batch commits together, applies summed balances once and rolls back a failing item alone`() {
         TestDatabase.reset()
+        val callSizes = CopyOnWriteArrayList<Int>()
+        val group = BatchGroup<Int, Long> { conn, items, deltas ->
+            callSizes += items.size
+            items.map { i ->
+                runCatching {
+                    ledger.post(conn, entry("p_$i", 100), deltas)
+                    if (i == 7) error("item 7 fails after writing its entry")
+                    i.toLong()
+                }
+            }
+        }
         LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { batchCommit ->
             val pool = Executors.newFixedThreadPool(20)
             val results = (1..20).map { i ->
                 pool.submit<Long> {
                     runBlocking {
-                        batchCommit.submit { conn, deltas ->
-                            ledger.post(conn, entry("p_$i", 100), deltas)
-                            if (i == 7) error("item 7 fails after writing its entry")
-                            i.toLong()
-                        }
+                        batchCommit.submit(group, i, BatchExecution.INDIVIDUAL)
                     }
                 }
             }
@@ -44,6 +51,7 @@ class LedgerBatchCommitTest {
             assertFailsWith<Exception> { results[6].get() }
             assertEquals((1..20L).filter { it != 7L }, results.filterIndexed { i, _ -> i != 6 }.map { it.get() })
             assertTrue(batchCommit.batches < 20, "${batchCommit.items} items in ${batchCommit.batches} batches")
+            assertEquals(List(20) { 1 }, callSizes)
         }
 
         val balances = dataSource.transaction { LedgerTable.balances(it) }.associate { it.account.code to it.signedSum }
@@ -65,7 +73,7 @@ class LedgerBatchCommitTest {
         }
         LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { batchCommit ->
             val pool = Executors.newFixedThreadPool(20)
-            val results = (1..20).map { i -> pool.submit<Int> { runBlocking { batchCommit.submit(group, i) } } }
+            val results = (1..20).map { i -> pool.submit<Int> { runBlocking { batchCommit.submit(group, i, BatchExecution.TOGETHER) } } }
             pool.shutdown()
             assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS))
 

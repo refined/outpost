@@ -2,6 +2,7 @@ package io.github.refined.morledger.payments
 
 import io.github.refined.morledger.db.transaction
 import io.github.refined.morledger.ledger.BatchGroup
+import io.github.refined.morledger.ledger.BatchExecution
 import io.github.refined.morledger.ledger.ChartOfAccounts
 import io.github.refined.morledger.ledger.EntryKind
 import io.github.refined.morledger.ledger.LedgerBatchCommit
@@ -56,11 +57,8 @@ class PaymentService(
         )
         val capture = Stored(payment, fingerprint)
 
-        return if (batchCommit != null) {
-            batchCommit.submit(captures, capture)
-        } else {
-            withContext(Dispatchers.IO) { dataSource.transaction { recordCaptures(it, listOf(capture), null) } }.single().getOrThrow()
-        }
+        return batchCommit?.submit(captures, capture, BatchExecution.TOGETHER)
+            ?: withContext(Dispatchers.IO) { dataSource.transaction { recordCaptures(it, listOf(capture), null) } }.single().getOrThrow()
     }
 
     private val captures = BatchGroup<Stored<Payment>, Recorded<PaymentDetails>> { conn, items, deltas -> recordCaptures(conn, items, deltas) }
