@@ -6,6 +6,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Test
 import java.time.Instant
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
@@ -21,6 +22,32 @@ class LedgerBatchCommitTest {
 
     private fun entry(id: String, amount: Long) =
         NewJournalEntry(EntryKind.CAPTURE, id, null, Instant.parse("2026-10-01T10:00:00Z"), listOf(Posting(clearing, amount), Posting(merchant, -amount)))
+
+    @Test
+    fun `a shared handler keeps concurrent writers and their typed results separate`() {
+        TestDatabase.reset()
+        val bothRunning = CyclicBarrier(2)
+        val group = BatchGroup<Int, String> { conn, items, deltas ->
+            bothRunning.await(5, TimeUnit.SECONDS)
+            ledger.postAll(conn, items.map { entry("p_$it", 100) }, deltas)
+            items.map { Result.success("payment_$it") }
+        }
+        LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).use { first ->
+            LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).use { second ->
+                val pool = Executors.newFixedThreadPool(2)
+                try {
+                    val one = pool.submit<String> { runBlocking { first.submit(group, 1, BatchExecution.TOGETHER) } }
+                    val two = pool.submit<String> { runBlocking { second.submit(group, 2, BatchExecution.TOGETHER) } }
+                    assertEquals("payment_1", one.get(10, TimeUnit.SECONDS))
+                    assertEquals("payment_2", two.get(10, TimeUnit.SECONDS))
+                } finally {
+                    pool.shutdownNow()
+                }
+            }
+        }
+        assertEquals(2, dataSource.transaction { LedgerTable.entries(it, limit = 1000) }.size)
+        assertEquals(emptyList(), dataSource.transaction { LedgerTable.verify(it) })
+    }
 
     @Test
     fun `a batch commits together, applies summed balances once and rolls back a failing item alone`() {
