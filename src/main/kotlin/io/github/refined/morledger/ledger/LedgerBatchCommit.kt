@@ -70,20 +70,15 @@ class LedgerBatchCommit(
     private val queue = LinkedBlockingQueue<Work<*, *>>()
     private val batchCount = AtomicLong()
     private val itemCount = AtomicLong()
-    private val writer = Thread(::loop, "ledger-batch-commit").apply {
-        isDaemon = true
-        start()
-    }
+    private val writer = Thread(::loop, "ledger-batch-commit").apply { isDaemon = true }
 
     val batches: Long get() = batchCount.get()
     val items: Long get() = itemCount.get()
 
-    suspend fun <T> submit(block: (Connection, MutableMap<Long, Long>) -> T): T {
-        val group = BatchGroup<Unit, T> { conn, _, deltas -> listOf(Result.success(block(conn, deltas))) }
-        return submit(group, Unit, BatchExecution.INDIVIDUAL)
-    }
+    fun start(): LedgerBatchCommit = apply { writer.start() }
 
     suspend fun <I, T> submit(group: BatchGroup<I, T>, item: I, execution: BatchExecution): T {
+        check(writer.isAlive) { "the batch writer is not running: call start() first" }
         val work = Work(group, item, execution)
         queue.put(work)
         return work.result.await()

@@ -58,7 +58,9 @@ class PaymentService(
         val capture = Stored(payment, fingerprint)
 
         return batchCommit?.submit(captures, capture, BatchExecution.TOGETHER)
-            ?: withContext(Dispatchers.IO) { dataSource.transaction { recordCaptures(it, listOf(capture), null) } }.single().getOrThrow()
+            ?: withContext(Dispatchers.IO) {
+                dataSource.transaction { recordCaptures(it, listOf(capture), null) }
+            }.single().getOrThrow()
     }
 
     private val captures = BatchGroup<Stored<Payment>, Recorded<PaymentDetails>> { conn, items, deltas -> recordCaptures(conn, items, deltas) }
@@ -104,51 +106,61 @@ class PaymentService(
         if (cmd.amount != null && cmd.amount <= 0) throw ValidationException("amount must be a positive number of minor units")
         val refundedAt = validateEventTime("refundedAt", cmd.refundedAt)
         val fingerprint = fingerprint("refund", cmd.paymentId, cmd.refundId, cmd.amount, cmd.refundedAt?.let { refundedAt })
+        val request = Stored(cmd.copy(refundedAt = refundedAt), fingerprint)
 
-        return write { conn, deltas ->
-            // Lock first: concurrent refunds of the same payment queue up here and see each other's results.
-            val payment = PaymentsTable.find(conn, cmd.paymentId, forUpdate = true)?.value
-                ?: throw NotFoundException("payment_not_found", "payment ${cmd.paymentId} has not been captured")
+        return batchCommit?.submit(refunds, request, BatchExecution.INDIVIDUAL)
+            ?: withContext(Dispatchers.IO) { dataSource.transaction { recordRefund(it, request, null) } }
+    }
 
-            RefundsTable.find(conn, cmd.refundId)?.let { existing ->
-                return@write replayRefund(conn, existing, fingerprint)
-            }
+    private val refunds = BatchGroup<Stored<RefundCommand>, Recorded<RefundResult>> { conn, items, deltas ->
+        items.map { runCatching { recordRefund(conn, it, deltas) } }
+    }
 
-            if (refundedAt.isBefore(payment.capturedAt)) {
-                throw UnprocessableException("refund_before_capture", "refundedAt is before the payment's capturedAt")
-            }
-            val before = PaymentDetails(payment, RefundsTable.forPayment(conn, payment.paymentId))
-            val remaining = before.refundable
-            if (remaining.total == 0L) {
-                throw UnprocessableException("payment_fully_refunded", "payment ${payment.paymentId} is already fully refunded")
-            }
-            val amount = cmd.amount ?: remaining.total
-            if (amount > remaining.total) {
-                throw UnprocessableException(
-                    "refund_exceeds_refundable",
-                    "refund of $amount exceeds the refundable ${remaining.total} for payment ${payment.paymentId}",
-                )
-            }
+    private fun recordRefund(conn: Connection, request: Stored<RefundCommand>, deltas: MutableMap<Long, Long>?): Recorded<RefundResult> {
+        val cmd = request.value
+        val refundedAt = checkNotNull(cmd.refundedAt)
+        // Lock first: concurrent refunds of the same payment queue up here and see each other's results.
+        val payment = PaymentsTable.find(conn, cmd.paymentId, forUpdate = true)?.value
+            ?: throw NotFoundException("payment_not_found", "payment ${cmd.paymentId} has not been captured")
 
-            val refund = Refund(cmd.refundId, payment.paymentId, Allocation.allocateRefund(remaining, amount), refundedAt, refundedAt)
-            if (!RefundsTable.insert(conn, refund, fingerprint)) {
-                // The same refundId was just recorded for another payment (that payment's lock didn't stop us).
-                throw ConflictException("idempotency_conflict", "refund ${cmd.refundId} already exists")
-            }
-            ledger.post(
-                conn,
-                NewJournalEntry(
-                    kind = EntryKind.REFUND,
-                    paymentId = payment.paymentId,
-                    refundId = refund.refundId,
-                    effectiveAt = refundedAt,
-                    postings = ChartOfAccounts.refund(payment.currency, payment.taxJurisdiction, payment.merchantId, refund.split),
-                ),
-                deltas,
-            )
-            val after = details(conn, payment.paymentId)!!
-            Recorded(RefundResult(after.refunds.single { it.refundId == refund.refundId }, after), created = true)
+        RefundsTable.find(conn, cmd.refundId)?.let { existing ->
+            return replayRefund(conn, existing, request.fingerprint)
         }
+
+        if (refundedAt.isBefore(payment.capturedAt)) {
+            throw UnprocessableException("refund_before_capture", "refundedAt is before the payment's capturedAt")
+        }
+        val before = PaymentDetails(payment, RefundsTable.forPayment(conn, payment.paymentId))
+        val remaining = before.refundable
+        if (remaining.total == 0L) {
+            throw UnprocessableException("payment_fully_refunded", "payment ${payment.paymentId} is already fully refunded")
+        }
+        val amount = cmd.amount ?: remaining.total
+        if (amount > remaining.total) {
+            throw UnprocessableException(
+                "refund_exceeds_refundable",
+                "refund of $amount exceeds the refundable ${remaining.total} for payment ${payment.paymentId}",
+            )
+        }
+
+        val refund = Refund(cmd.refundId, payment.paymentId, Allocation.allocateRefund(remaining, amount), refundedAt, refundedAt)
+        if (!RefundsTable.insert(conn, refund, request.fingerprint)) {
+            // The same refundId was just recorded for another payment (that payment's lock didn't stop us).
+            throw ConflictException("idempotency_conflict", "refund ${cmd.refundId} already exists")
+        }
+        ledger.post(
+            conn,
+            NewJournalEntry(
+                kind = EntryKind.REFUND,
+                paymentId = payment.paymentId,
+                refundId = refund.refundId,
+                effectiveAt = refundedAt,
+                postings = ChartOfAccounts.refund(payment.currency, payment.taxJurisdiction, payment.merchantId, refund.split),
+            ),
+            deltas,
+        )
+        val after = details(conn, payment.paymentId)!!
+        return Recorded(RefundResult(after.refunds.single { it.refundId == refund.refundId }, after), created = true)
     }
 
     fun page(merchantId: String?, status: PaymentStatus?, limit: Int, offset: Int): PaymentPage =
@@ -160,9 +172,6 @@ class PaymentService(
     fun get(paymentId: String): PaymentDetails =
         dataSource.transaction { details(it, paymentId) }
             ?: throw NotFoundException("payment_not_found", "payment $paymentId not found")
-
-    private suspend fun <T> write(block: (Connection, MutableMap<Long, Long>?) -> T): T =
-        if (batchCommit != null) batchCommit.submit(block) else withContext(Dispatchers.IO) { dataSource.transaction { block(it, null) } }
 
     private fun details(conn: Connection, paymentId: String): PaymentDetails? =
         PaymentsTable.find(conn, paymentId)?.let { PaymentDetails(it.value, RefundsTable.forPayment(conn, paymentId)) }

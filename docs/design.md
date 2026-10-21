@@ -116,7 +116,7 @@ Where the brief is open, these are the decisions and why.
 | 4 | When do terms apply? | Fee rate and refund policy are **snapshotted on each payment at capture** | Changing config must not rewrite the economics of past sales |
 | 5 | Rounding | Tax and fee **HALF_UP** to minor units; the merchant gets the exact remainder | Commercial rounding, as on invoices; the entry always balances |
 | 6 | Partial refunds | Apportioned across **what remains** of tax / fee / merchant by **largest remainder**; the refund that empties the payment takes exactly what is left. Ties favour merchant → fee → tax | No drift and no negative parts, proven by a property test; on a tie, the cent never reduces the tax owed |
-| 7 | Idempotency | `paymentId` / `refundId` are the **external event ids**; a hash of the request tells a replay (200, original body) from a conflict (409) | Matches webhook retry semantics without a separate `Idempotency-Key` header |
+| 7 | Idempotency | `paymentId` / `refundId` are the **external event ids**; a hash of the request tells a replay (200, stored operation with current payment details) from a conflict (409) | Matches webhook retry semantics without a separate `Idempotency-Key` header |
 | 8 | Refund amount | Optional; **omitted = full refund of what remains** | The full refund is the main flow |
 | 9 | Negative merchant balance | **Allowed** and reported | A kept fee or a refund after payout means the merchant owes the MoR; recovery happens in payouts (out of scope) |
 | 10 | Tax authorities | `taxJurisdiction` is **required** on capture (`NL`, `DE`, `US-CA`); one payable account per jurisdiction and currency | "Owed to tax authorities" is plural; the MoR remits per authority |
@@ -127,16 +127,16 @@ Where the brief is open, these are the decisions and why.
 
 ## Trade-offs
 
-**Own ledger on Postgres vs TigerBeetle vs Formance.** The decisive argument is atomicity with the business record: the payment row, its idempotency fingerprint and its journal entry commit in one transaction.
+**Own ledger on Postgres vs TigerBeetle vs Formance.** Understanding the accounting mechanics motivated building our own ledger. The main architectural reason to keep it is atomicity with the business record: the payment row, its idempotency fingerprint and its journal entry commit in one transaction. [The comparison](ledger-comparison.md) separates the integrated TigerBeetle prototype from alternatives reviewed only through documentation.
 
 - **TigerBeetle**
   - What it offers: very high throughput, strict double-entry semantics, linked transfers, and balance limits (it could enforce "refunds ≤ capture" on its own).
-  - What it costs: payment metadata still needs a database, so every capture becomes a dual write between that database and TigerBeetle. That needs an outbox or a reconciliation job. One more stateful process to run. Our load is far below where it pays off.
-  - Measured: we integrated it and benchmarked it under the same 2 CPU / 3 GB budget. Its ~2.3 GB of static memory starved the app and Postgres, and it held no step, not even 200 rps ([performance.md](performance.md)). It was then removed.
+  - What it costs: payment metadata still lives in Postgres, so the prototype writes to two systems. A production version would need durable retry and reconciliation, plus another stateful service to operate. The brief supplies no production traffic target to justify that cost.
+  - Measured: the stage-1 integration held 200 captures / 300 one-merchant / 200 mixed requests per second under the shared 2 CPU / 3 GB budget. Its configuration allocated ~2.3 GB to TigerBeetle, and the application still had the request-thread bottleneck. It was not rerun after later optimizations, so these numbers do not rank the engines' intrinsic throughput ([performance.md](performance.md)).
 - **Formance Ledger**
   - What it offers: a ready ledger API, Numscript for splits (including rounding allotments), and built-in audit history.
-  - What it costs: a separate service to run, the same dual-write problem, and the domain rules would live in Numscript instead of tested Kotlin.
-- **Our engine** is small and sits behind the ledger package that knows nothing about payments, so it could be swapped. It also lets the database enforce the invariants itself (append-only triggers, fixed account identity).
+  - What it costs: a separate service and coordination with our payment records; using Numscript for allocation would add another place for domain logic. This option was reviewed through documentation, not implemented or benchmarked.
+- **Our engine** keeps the required accounting operations in Kotlin and SQL, with no additional store. We own correctness and maintenance: the database enforces append-only history and fixed account identity, while per-entry balance is validated in the application. Reconciliation compares stored balances with postings; it is not an independent per-entry balance check.
 
 **Running balances, updated synchronously.**
 - **Chosen:** the stored balance changes in the same transaction as its postings.

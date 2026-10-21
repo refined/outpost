@@ -8,6 +8,8 @@ Both keep p95 latency at 3–4 ms at 300 requests/s, and both keep balances exac
 
 These are exploratory measurements, not validated sustained capacity. Their limits: unequal preload sizes, short steps that can stop early, and no repeats. Small differences between stages should not be attributed to code changes.
 
+This is an end-to-end application study, not a benchmark ranking of ledger products. TigerBeetle was measured only at stage 1, before the request-thread fix; Formance was not benchmarked. The later Postgres stages also changed batching and entry validation. For the architectural decision, see [ledger comparison](ledger-comparison.md). The numbers belong to the commits listed below; subsequent refactors have not been rebenchmarked, and the hosted demo runs on a different environment.
+
 ```mermaid
 xychart-beta
     title "Mixed load, req/s: bars STORED, line BATCHED"

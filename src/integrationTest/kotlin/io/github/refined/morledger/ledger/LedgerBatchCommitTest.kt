@@ -32,8 +32,8 @@ class LedgerBatchCommitTest {
             ledger.postAll(conn, items.map { entry("p_$it", 100) }, deltas)
             items.map { Result.success("payment_$it") }
         }
-        LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).use { first ->
-            LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).use { second ->
+        LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).start().use { first ->
+            LedgerBatchCommit(dataSource, ledger, maxSize = 1, maxWaitMs = 0).start().use { second ->
                 val pool = Executors.newFixedThreadPool(2)
                 try {
                     val one = pool.submit<String> { runBlocking { first.submit(group, 1, BatchExecution.TOGETHER) } }
@@ -63,7 +63,7 @@ class LedgerBatchCommitTest {
                 }
             }
         }
-        LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { batchCommit ->
+        LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).start().use { batchCommit ->
             val pool = Executors.newFixedThreadPool(20)
             val results = (1..20).map { i ->
                 pool.submit<Long> {
@@ -98,7 +98,7 @@ class LedgerBatchCommitTest {
             check(13 !in items) { "item 13 fails after writing" }
             items.map { Result.success(it) }
         }
-        LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).use { batchCommit ->
+        LedgerBatchCommit(dataSource, ledger, maxSize = 100, maxWaitMs = 200).start().use { batchCommit ->
             val pool = Executors.newFixedThreadPool(20)
             val results = (1..20).map { i -> pool.submit<Int> { runBlocking { batchCommit.submit(group, i, BatchExecution.TOGETHER) } } }
             pool.shutdown()

@@ -70,7 +70,9 @@ fun main() {
     val config = AppConfig.fromEnv()
     val dataSource = Database.connect(config.dbUrl, config.dbUser, config.dbPassword)
     Database.migrate(dataSource)
-    embeddedServer(Netty, port = config.port) { module(dataSource, config.pricing, settings = config.ledger) }.start(wait = true)
+    embeddedServer(Netty, port = config.port) {
+        module(dataSource, config.pricing, settings = config.ledger)
+    }.start(wait = true)
 }
 
 fun Application.module(
@@ -81,7 +83,7 @@ fun Application.module(
 ) {
     val ledger = LedgerWriter()
     val batchCommit = if (settings.balanceMode == BalanceMode.BATCHED) {
-        LedgerBatchCommit(dataSource, ledger, settings.batchMaxSize, settings.batchMaxWaitMs).also { batchCommit ->
+        LedgerBatchCommit(dataSource, ledger, settings.batchMaxSize, settings.batchMaxWaitMs).start().also { batchCommit ->
             monitor.subscribe(ApplicationStopped) {
                 log.info("Batch commit: {} items in {} batches", batchCommit.items, batchCommit.batches)
                 batchCommit.close()

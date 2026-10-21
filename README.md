@@ -24,7 +24,21 @@ This service is the MoR's **ledger**: the source of truth for who is owed what. 
 - **handle several currencies**, each kept separately;
 - **show what each merchant did**: volume, refunds, fees, tax and the running balance, in a web console.
 
-The ledger is our own double-entry ledger on Postgres. Six ways of keeping balances, TigerBeetle among them, were benchmarked under the same resource budget before choosing ([ledger comparison](docs/ledger-comparison.md), [performance](docs/performance.md)).
+The ledger uses double-entry accounting on Postgres. The choice and the experiments behind it are below.
+
+## Why I built the ledger
+
+I started with my own implementation to understand the mechanics: balanced postings, refund allocation, idempotency, and concurrent balance updates. I enjoyed this part of the problem and spent additional time integrating an alternative engine, profiling the service, and measuring different ways to maintain balances.
+
+I kept the Postgres implementation because the payment, its idempotency record, the journal entry and the balances commit in one transaction. It covers the brief's accounting flows with no additional service to operate. The trade-off is owning the correctness and maintenance of the ledger code, including the validation limits described below.
+
+| Option | What it offers | Cost in this service | Evaluation |
+|---|---|---|---|
+| Own Postgres ledger | One transaction with payment data; explicit Kotlin and SQL | We implement and test the accounting invariants; shared balance rows can contend | Implemented, tested and benchmarked |
+| TigerBeetle | A dedicated financial database with atomic linked transfers | A separate store to coordinate with Postgres and operate | Integrated and benchmarked, then removed |
+| Formance | A ledger API with Numscript transaction scripting | A separate service and coordination with our payment records | Documentation review; not benchmarked |
+
+The [ledger comparison](docs/ledger-comparison.md) records what the integration taught us. The separate [performance study](docs/performance.md) follows our own implementation's optimizations. In short 20-second steps on a 2-CPU / 3-GB system budget, the measured `BATCHED` version reached **5200 captures/s and 3500 mixed requests/s**, versus **900 and 800** for `STORED` (p95 < 200 ms). These are exploratory results from the documented commits, not sustained-capacity guarantees or a ranking of ledger products; later refactors have not been rebenchmarked.
 
 ## How it works
 
@@ -46,12 +60,7 @@ flowchart LR
 There are three ways in:
 
 - **REST API** (`/v1`): what a payment provider's webhooks or a checkout would call.
-- **Console** (`/ui/`), one page per question:
-  - **Overview**: what the MoR owes now, and the activity in a period: captured vs refunded over time, where the money went (a flow diagram), tax by jurisdiction, top merchants;
-  - **Merchants**: every merchant's volume, refunds, refund rate, fees, tax and balance, each checked against the ledger;
-  - **Merchant**: one merchant's activity and running balance, its payments (refund from there) and its journal entries;
-  - **Ledger**: every account, the journal, and a reconciliation of stored balances against postings;
-  - **Simulate**: send capture/refund events by hand or run a scripted scenario.
+- **Console** (`/ui/`): balances and activity, merchant drill-downs, journal and reconciliation, capture/refund simulation, and the benchmark history.
 - **Swagger** (`/docs/`): the interactive API spec.
 
 ### The API
@@ -124,7 +133,7 @@ Customer paid €121.00 in NL, VAT 21%, MoR fee 5%
 A refund is the mirror entry for the refunded part.
 
 - **Partial refunds.** A partial refund is split across tax, fee and merchant in proportion to what is still refundable of each. The refund that empties the payment takes exactly what is left, so a series of partial refunds never drifts by a cent. A property test checks this over 10,000 random sequences.
-- **The fee.** By default **the MoR keeps its fee** (`REFUND_FEE_POLICY=MOR_KEEPS_FEE`), like most payment providers. After a full refund, the merchant's balance is **−€6.05**: the merchant owes the MoR its fee. With `MOR_RETURNS_FEE`, everything goes back to zero.
+- **The fee.** By default **the MoR keeps its fee** (`REFUND_FEE_POLICY=MOR_KEEPS_FEE`), an explicit pricing assumption. After a full refund, the merchant's balance is **−€6.05**: the merchant owes the MoR its fee. With `MOR_RETURNS_FEE`, everything goes back to zero.
 
 ### Balances
 
@@ -192,11 +201,8 @@ Every decision with its reasoning: [docs/design.md](docs/design.md#assumptions).
 
 ## Key trade-offs
 
-- **Own ledger on Postgres instead of TigerBeetle or Formance.** The payment and its journal entry commit in one transaction. An external ledger would turn every payment into a write to two systems that can disagree. We integrated TigerBeetle and measured it: under the same 2 CPU / 3 GB budget it was the slowest variant, so it was removed. The ledger is a small module that knows nothing about payments, so it can still be replaced.
-- **Balances stored and updated synchronously, not recomputed on every read or fed from a queue.**
-  - Current reports read account balances instead of summing the full posting history, and reflect committed transactions.
-  - The cost is a short lock on the shared accounts (`fee_revenue`, `psp_clearing`) per payment. On 2 CPUs it caps `STORED` at ~700–900 requests/s, the lowest when every payment goes to one merchant (a benchmark scenario).
-  - For more throughput: `BALANCE_MODE=BATCHED` turns on group commit. Queued requests share one transaction, one commit and one balance update per account; balances stay exact. Its captures are written as sets, one multi-row insert per table, so short benchmark steps reached 3500 mixed requests/s and 5200 captures/s with p95 under 200 ms ([performance.md](docs/performance.md)).
+- **One database transaction, with accounting correctness owned here.** Keeping the ledger beside the payment records avoids coordinating commits across systems. The cost is maintaining our own invariants, tests and reconciliation; see [the ledger choice](#why-i-built-the-ledger).
+- **Exact running balances, with contention on shared accounts.** Current reports read stored balances without scanning history. `STORED` locks shared balance rows for each transaction; `BATCHED` amortizes commits and balance updates across requests, at the cost of a queue, a single writer and retry handling. Both answer after commit. [Measurements and alternatives](docs/performance.md).
 - **Event ids as idempotency keys**, matching how payment-provider webhooks are retried.
 - **Explicit SQL with a small JDBC helper.** `*Table` objects hold queries; `${param(value)}` interpolation binds values safely. Services coordinate transactions and business rules without an ORM.
 
